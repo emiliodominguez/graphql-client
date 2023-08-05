@@ -1,0 +1,23 @@
+{
+	"name": "graphql-client",
+	"version": "1.0.0",
+	"description": "",
+	"main": "index.js",
+	"keywords": [],
+	"author": "Emilio Dominguez",
+	"license": "MIT",
+	"scripts": {
+		"start": "run-s tsc run",
+		"dev": "run-p tsc:watch run:watch",
+		"run": "node dist/index.js",
+		"run:watch": "node --watch dist/index.js",
+		"tsc": "tsc",
+		"tsc:watch": "tsc -w",
+		"prettier": "prettier --write src/**/*.{js,ts}"
+	},
+	"devDependencies": {
+		"npm-run-all": "^4.1.5",
+		"prettier": "^3.0.1",
+		"typescript": "^5.1.6"
+	}
+}
