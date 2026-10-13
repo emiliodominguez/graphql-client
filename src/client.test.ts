@@ -63,14 +63,25 @@ function setup(configuration: Partial<ClientConfiguration> = {}, fetchMock = moc
 }
 
 /**
- * Reads the RequestInit of a fetch mock call.
+ * Reads the Request of a fetch mock call.
  *
  * @param fetchMock - The fetch mock
  * @param call - Call index
- * @returns The RequestInit passed to fetch
+ * @returns The Request passed to fetch
  */
-function getInit(fetchMock: ReturnType<typeof mockFetch>, call = 0): RequestInit {
-	return fetchMock.mock.calls[call]![1]!;
+function getRequest(fetchMock: ReturnType<typeof mockFetch>, call = 0): Request {
+	return fetchMock.mock.calls[call]![0] as Request;
+}
+
+/**
+ * Reads the JSON body of a fetch mock call.
+ *
+ * @param fetchMock - The fetch mock
+ * @param call - Call index
+ * @returns The parsed body
+ */
+async function getBody(fetchMock: ReturnType<typeof mockFetch>, call = 0): Promise<Record<string, unknown>> {
+	return getRequest(fetchMock, call).clone().json();
 }
 
 /**
@@ -81,7 +92,7 @@ function getInit(fetchMock: ReturnType<typeof mockFetch>, call = 0): RequestInit
  * @returns Lower-cased header names mapped to values
  */
 function getHeaders(fetchMock: ReturnType<typeof mockFetch>, call = 0): Record<string, string> {
-	return Object.fromEntries(new Headers(getInit(fetchMock, call).headers));
+	return Object.fromEntries(getRequest(fetchMock, call).headers);
 }
 
 describe("Client", function () {
@@ -99,11 +110,8 @@ describe("Client", function () {
 
 			expect(data).toEqual(USER);
 			expect(fetchMock).toHaveBeenCalledTimes(1);
-			expect(fetchMock.mock.calls[0]![0]).toBe(URL);
-			expect(getInit(fetchMock)).toMatchObject({
-				method: "POST",
-				body: JSON.stringify({ query: GET_USER, variables: { id: 1 } }),
-			});
+			expect(getRequest(fetchMock)).toMatchObject({ url: URL, method: "POST" });
+			expect(await getBody(fetchMock)).toEqual({ query: GET_USER, variables: { id: 1 } });
 		});
 
 		it("sends operationName when provided", async function () {
@@ -111,7 +119,7 @@ describe("Client", function () {
 
 			await client.gql({ query: GET_USER, operationName: "GetUser" });
 
-			expect(JSON.parse(String(getInit(fetchMock).body))).toEqual({ query: GET_USER, operationName: "GetUser" });
+			expect(await getBody(fetchMock)).toEqual({ query: GET_USER, operationName: "GetUser" });
 		});
 
 		it("falls back to the global fetch", async function () {
@@ -129,7 +137,7 @@ describe("Client", function () {
 
 			await client.gql({ query: new String(GET_USER) });
 
-			expect(JSON.parse(String(getInit(fetchMock).body)).query).toBe(GET_USER);
+			expect((await getBody(fetchMock)).query).toBe(GET_USER);
 		});
 	});
 
@@ -300,12 +308,14 @@ describe("Client", function () {
 		/**
 		 * fetch mock that never settles until its signal aborts, like the real thing.
 		 */
-		const hangingFetch = vi.fn<typeof fetch>(function (_input, init) {
-			return new Promise<Response>(function (_resolve, reject) {
-				if (init?.signal?.aborted) return reject(init.signal.reason);
+		const hangingFetch = vi.fn<typeof fetch>(function (input) {
+			const { signal } = input as Request;
 
-				init?.signal?.addEventListener("abort", function () {
-					reject(init.signal?.reason);
+			return new Promise<Response>(function (_resolve, reject) {
+				if (signal.aborted) return reject(signal.reason);
+
+				signal.addEventListener("abort", function () {
+					reject(signal.reason);
 				});
 			});
 		});
@@ -540,9 +550,9 @@ describe("Client", function () {
 			});
 
 			expect(lines[0]).toBe("[graphql-client] query GetUser → deduplicated");
-			expect(lines[1]).toMatch(/^\[graphql-client\] query GetUser → 200 in \d+ms$/);
+			expect(lines[1]).toMatch(/^\[graphql-client\] query GetUser → ok in \d+ms$/);
 			expect(lines[2]).toBe("[graphql-client] query GetUser → cache hit");
-			expect(lines[3]).toMatch(/^\[graphql-client\] query \(anonymous\) → 200/);
+			expect(lines[3]).toMatch(/^\[graphql-client\] query \(anonymous\) → ok/);
 		});
 
 		it("stays silent by default", async function () {

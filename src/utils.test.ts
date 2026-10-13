@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAbortScope, createCacheKey, matchesKeyPrefix, parseOperation, resolveValue, stableStringify } from "./utils";
+import {
+	createAbortScope,
+	createCacheKey,
+	matchesKeyPrefix,
+	parseOperation,
+	resolveValue,
+	sha256,
+	sleep,
+	stableStringify,
+} from "./utils";
 
 describe("parseOperation", function () {
 	it.each([
@@ -102,11 +111,22 @@ describe("createAbortScope", function () {
 		vi.useRealTimers();
 	});
 
-	it("passes the signal through when there is no timeout", function () {
-		const controller = new AbortController();
+	it("never aborts on its own without a timeout", function () {
+		vi.useFakeTimers();
 
-		expect(createAbortScope(controller.signal).signal).toBe(controller.signal);
-		expect(createAbortScope().signal).toBeUndefined();
+		const scope = createAbortScope(undefined, Infinity);
+
+		vi.advanceTimersByTime(Number.MAX_SAFE_INTEGER);
+
+		expect(scope.signal.aborted).toBe(false);
+	});
+
+	it("can be aborted manually", function () {
+		const scope = createAbortScope();
+
+		scope.abort("manual");
+
+		expect(scope.signal.reason).toBe("manual");
 	});
 
 	it("aborts with a TimeoutError", function () {
@@ -146,5 +166,40 @@ describe("createAbortScope", function () {
 		vi.advanceTimersByTime(100);
 
 		expect(scope.signal?.aborted).toBe(false);
+	});
+});
+
+describe("sleep", function () {
+	afterEach(function () {
+		vi.useRealTimers();
+	});
+
+	it("resolves after the delay", async function () {
+		vi.useFakeTimers();
+
+		const resolved = vi.fn();
+
+		sleep(100, new AbortController().signal).then(resolved);
+		await vi.advanceTimersByTimeAsync(99);
+		expect(resolved).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(1);
+		expect(resolved).toHaveBeenCalled();
+	});
+
+	it("rejects with the abort reason", async function () {
+		const controller = new AbortController();
+		const pending = sleep(10_000, controller.signal);
+
+		controller.abort("stop");
+
+		await expect(pending).rejects.toBe("stop");
+		await expect(sleep(1, AbortSignal.abort("early"))).rejects.toBe("early");
+	});
+});
+
+describe("sha256", function () {
+	it("matches the NIST test vector", async function () {
+		expect(await sha256("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 	});
 });

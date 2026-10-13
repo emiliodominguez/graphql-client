@@ -125,6 +125,73 @@ export interface ClientConfiguration {
 	dedupe?: boolean;
 	/** Logs operations, cache hits and timings through `console.debug`. */
 	debug?: boolean;
+	/** Retry policy for failed requests. Disabled by default. A number sets the attempts with default backoff. */
+	retry?: number | RetryOptions;
+	/** Fetch-level middleware, run in order around every request (including retries). */
+	middleware?: ReadonlyArray<Middleware>;
+	/** HTTP method for queries. `GET` enables CDN/browser caching. Mutations always use `POST`. Defaults to `POST`. */
+	method?: "GET" | "POST";
+	/** Automatic Persisted Queries: send a SHA-256 hash first and the full document only when the server asks. */
+	persistedQueries?: boolean | PersistedQueriesOptions;
+}
+
+/**
+ * Metadata about the operation being executed, exposed to middleware and retry predicates.
+ */
+export interface OperationContext {
+	/** The operation type */
+	type: OperationType;
+	/** The operation name, if any */
+	name?: string;
+	/** The GraphQL document */
+	query: string;
+	/** Operation variables */
+	variables?: unknown;
+	/** Zero-based attempt number (`0` is the first try) */
+	attempt: number;
+}
+
+/**
+ * Calls the next middleware, or `fetch` at the end of the chain.
+ *
+ * @param request - The request to forward. Defaults to the incoming one.
+ */
+export type MiddlewareNext = (request?: Request) => Promise<Response>;
+
+/**
+ * Wraps a request: inspect or replace the `Request`, then inspect or replace the `Response`.
+ *
+ * @param request - The outgoing request
+ * @param next - Forwards the request down the chain
+ * @param context - The operation metadata
+ * @returns The response
+ */
+export type Middleware = (request: Request, next: MiddlewareNext, context: OperationContext) => Promise<Response>;
+
+/**
+ * Retry policy.
+ */
+export interface RetryOptions {
+	/** Maximum number of retries after the first attempt. Defaults to `2`. */
+	attempts?: number;
+	/**
+	 * Delay before a retry, in milliseconds, or a function of the retry index (0-based) and the error.
+	 * Defaults to exponential backoff with jitter (≈1s, 2s, 4s… capped at 30s), honoring `Retry-After`.
+	 */
+	delay?: number | ((retry: number, error: unknown) => number);
+	/**
+	 * Decides whether an error is retryable.
+	 * Defaults to network failures and HTTP 408/429/5xx, for queries only (mutations are not idempotent).
+	 */
+	retryIf?: (error: unknown, context: OperationContext) => boolean;
+}
+
+/**
+ * Automatic Persisted Queries options.
+ */
+export interface PersistedQueriesOptions {
+	/** Custom document hash. Defaults to SHA-256 via Web Crypto. */
+	hash?: (query: string) => MaybePromise<string>;
 }
 
 /**
@@ -148,6 +215,21 @@ export interface RequestOptions<TData, TVariables> {
 	headers?: HeadersInit;
 	/** Abort signal for this call */
 	signal?: AbortSignal;
-	/** Timeout in milliseconds for this call. Overrides the client default. */
+	/** Timeout in milliseconds for this call, covering every retry. Overrides the client default. */
 	timeout?: number;
+	/** Retry policy for this call. Overrides the client default; `false` disables retries. */
+	retry?: number | RetryOptions | false;
+	/** Cache key prefixes to invalidate once the operation succeeds (typically after a mutation). */
+	invalidates?: ReadonlyArray<CacheKey>;
 }
+
+/**
+ * Options for a single {@link Client.subscribe} call.
+ *
+ * @template TData - The shape of each `data` payload
+ * @template TVariables - The shape of the operation variables
+ */
+export type SubscribeOptions<TData, TVariables> = Pick<
+	RequestOptions<TData, TVariables>,
+	"query" | "variables" | "operationName" | "headers" | "signal"
+>;

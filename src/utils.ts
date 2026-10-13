@@ -14,8 +14,10 @@ export interface OperationInfo {
  * A combined abort signal plus its teardown.
  */
 export interface AbortScope {
-	/** Signal to forward to `fetch`, or `undefined` when neither a signal nor a timeout applies */
-	signal?: AbortSignal;
+	/** Signal to forward to `fetch` */
+	signal: AbortSignal;
+	/** Aborts the scope */
+	abort(reason?: unknown): void;
 	/** Releases timers and listeners. Must be called once the request settles. */
 	dispose(): void;
 }
@@ -156,18 +158,16 @@ export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Pr
 }
 
 /**
- * Merges an external abort signal with an optional timeout into a single signal.
+ * Merges an external abort signal with an optional timeout into a single, internally controllable signal.
  * Avoids `AbortSignal.any` / `AbortSignal.timeout` to keep older runtimes supported.
  *
  * @param signal - External abort signal
  * @param timeout - Timeout in milliseconds
- * @returns The combined signal and its teardown
+ * @returns The combined signal, a way to abort it and its teardown
  */
 export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortScope {
-	if (timeout === undefined || timeout === Infinity) return { signal, dispose: noop };
-
 	const controller = new AbortController();
-	const timer = setTimeout(abortOnTimeout, timeout);
+	const timer = timeout === undefined || timeout === Infinity ? undefined : setTimeout(abortOnTimeout, timeout);
 
 	/**
 	 * Aborts with the same `TimeoutError` reason `AbortSignal.timeout` would produce.
@@ -191,6 +191,9 @@ export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortS
 
 	return {
 		signal: controller.signal,
+		abort(reason?: unknown): void {
+			controller.abort(reason);
+		},
 		dispose(): void {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", abortFromSignal);
@@ -199,6 +202,56 @@ export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortS
 }
 
 /**
- * No-op teardown.
+ * Waits for a delay, rejecting early with the signal's reason when aborted.
+ *
+ * @param ms - Delay in milliseconds
+ * @param signal - Abort signal
+ * @returns A promise resolved after the delay
  */
-function noop(): void {}
+export function sleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise(function wait(resolve, reject): void {
+		if (signal.aborted) return reject(signal.reason);
+
+		const timer = setTimeout(done, ms);
+
+		/**
+		 * Resolves once the delay elapsed.
+		 */
+		function done(): void {
+			signal.removeEventListener("abort", cancel);
+			resolve();
+		}
+
+		/**
+		 * Rejects as soon as the signal aborts.
+		 */
+		function cancel(): void {
+			clearTimeout(timer);
+			reject(signal.reason);
+		}
+
+		signal.addEventListener("abort", cancel, { once: true });
+	});
+}
+
+/**
+ * Hashes a string with SHA-256 through Web Crypto.
+ *
+ * @param text - The input text
+ * @returns The lowercase hex digest
+ */
+export async function sha256(text: string): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+
+	return Array.from(new Uint8Array(digest), toHex).join("");
+}
+
+/**
+ * Formats a byte as two hex characters.
+ *
+ * @param byte - A byte value
+ * @returns The hex pair
+ */
+function toHex(byte: number): string {
+	return byte.toString(16).padStart(2, "0");
+}

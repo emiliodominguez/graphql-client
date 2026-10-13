@@ -1,7 +1,7 @@
 {
 	"name": "@emiliodominguez/graphql-client",
 	"version": "1.0.0",
-	"description": "Lightweight, zero-dependency, fully typed GraphQL client with LRU caching, request deduplication, cache invalidation, timeouts and typed errors.",
+	"description": "Lightweight, zero-dependency, fully typed GraphQL client: LRU caching, deduplication, retries, middleware, persisted queries, SSE subscriptions and typed errors.",
 	"keywords": [
 		"graphql",
 		"graphql-client",
@@ -15,6 +15,12 @@
 		"typed",
 		"zero-dependency",
 		"lightweight",
+		"persisted-queries",
+		"apq",
+		"subscriptions",
+		"sse",
+		"retry",
+		"middleware",
 		"isomorphic",
 		"esm",
 		"edge",
@@ -55,7 +61,7 @@
 	],
 	"sideEffects": false,
 	"engines": {
-		"node": ">=18"
+		"node": ">=20"
 	},
 	"scripts": {
 		"build": "tsup",
