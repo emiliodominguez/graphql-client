@@ -1,123 +1,160 @@
-import { BaseCache, CacheNode, MemoryCacheConfiguration } from "./memory-cache.d";
+import type { Cache } from "../types";
 
-export class MemoryCache implements BaseCache {
+/**
+ * Configuration for {@link MemoryCache}.
+ */
+export interface MemoryCacheConfiguration {
+	/** Time-to-live in milliseconds. Use `Infinity` to disable expiration. Defaults to 60 000 (1 minute). */
+	ttl: number;
+	/** Maximum number of entries before the least recently used one is evicted. Defaults to 100. */
+	maxSize: number;
+}
+
+/**
+ * Internal cache entry.
+ */
+interface Entry {
+	/** The cached value */
+	value: unknown;
+	/** Absolute expiration time in epoch milliseconds */
+	expiresAt: number;
+}
+
+/**
+ * In-memory LRU cache with per-entry TTL. All operations are O(1).
+ *
+ * Relies on `Map` insertion order: the first key is always the least recently used one,
+ * and every read or write moves the touched key to the end.
+ */
+export class MemoryCache implements Cache {
 	/**
-	 * The internal Map that stores cached data with their corresponding keys
+	 * Entries in LRU order (oldest first).
 	 */
-	private readonly _cache: Map<string, CacheNode<unknown>>;
+	private readonly entries = new Map<string, Entry>();
 
 	/**
-	 * The configuration options for the MemoryCache instance
+	 * Resolved configuration.
 	 */
 	private readonly configuration: MemoryCacheConfiguration;
 
 	/**
-	 * The internal Map that stores cached data with their corresponding keys
-	 */
-	get cache() {
-		return this._cache;
-	}
-
-	/**
-	 * @constructor
-	 * @param configuration - Optional configuration for the cache
+	 * @param configuration - Optional configuration overrides
+	 * @throws {RangeError} When `ttl` is negative or `maxSize` is not a positive integer
 	 */
 	constructor(configuration?: Partial<MemoryCacheConfiguration>) {
-		this._cache = new Map();
+		const ttl = configuration?.ttl ?? 60_000;
+		const maxSize = configuration?.maxSize ?? 100;
 
-		this.configuration = {
-			...configuration,
-			ttl: configuration?.ttl ?? 60 * 1000, // Cache time-to-live in milliseconds (1 minute)
-			maxSize: configuration?.maxSize ?? 100, // Maximum cache size (100 items)
-		};
+		if (Number.isNaN(ttl) || ttl < 0) {
+			throw new RangeError(`MemoryCache: "ttl" must be a non-negative number. Received ${ttl}.`);
+		}
+
+		if (!Number.isInteger(maxSize) || maxSize < 1) {
+			throw new RangeError(`MemoryCache: "maxSize" must be a positive integer. Received ${maxSize}.`);
+		}
+
+		this.configuration = { ttl, maxSize };
 	}
 
 	/**
-	 * Retrieves the cached data associated with the given key if it exists and is still valid
-	 * If the data is expired based on the TTL, it will be considered invalid, and the method returns undefined
-	 *
-	 * @param key - The key associated with the cached data to be retrieved
-	 * @returns The cached data payload or undefined if the data has expired or does not exist in the cache
+	 * Number of stored entries, including expired ones not yet pruned.
 	 */
-	get<Data>(key: string): CacheNode<Data> | undefined {
-		const payload = this._cache.get(key) as CacheNode<Data>;
+	get size(): number {
+		return this.entries.size;
+	}
 
-		if (payload && this.isValid(payload)) {
-			this.moveToFront<Data>(payload);
-			return payload;
+	/**
+	 * Reads a value and marks it as most recently used. Expired entries are removed on access.
+	 *
+	 * @template T - The stored value type
+	 * @param key - The cache key
+	 * @returns The value, or `undefined` on a miss or when expired
+	 */
+	get<T>(key: string): T | undefined {
+		const entry = this.entries.get(key);
+
+		if (!entry) return undefined;
+
+		this.entries.delete(key);
+
+		if (this.isExpired(entry)) return undefined;
+
+		this.entries.set(key, entry);
+
+		return entry.value as T;
+	}
+
+	/**
+	 * Stores a value as most recently used, evicting the least recently used entry when full.
+	 *
+	 * @template T - The value type
+	 * @param key - The cache key
+	 * @param value - The value to store
+	 */
+	set<T>(key: string, value: T): void {
+		this.entries.delete(key);
+		this.entries.set(key, { value, expiresAt: Date.now() + this.configuration.ttl });
+
+		if (this.entries.size > this.configuration.maxSize) {
+			this.entries.delete(this.entries.keys().next().value as string);
 		}
 	}
 
 	/**
-	 * Sets a value in the cache with the given key
+	 * Checks for a live entry without affecting its recency.
 	 *
-	 * @param key - The key to associate with the cached data
-	 * @param data - The partial cache payload containing the data to be cached
+	 * @param key - The cache key
+	 * @returns `true` when a non-expired entry exists
 	 */
-	set<Data>(key: string, data: Data): void {
-		this._cache.set(key, { key, data, timestamp: Date.now() });
-		this.evictLeastRecentlyUsed();
+	has(key: string): boolean {
+		const entry = this.entries.get(key);
+
+		return entry !== undefined && !this.isExpired(entry);
 	}
 
 	/**
-	 * Removes a specific item from the cache based on its key
+	 * Removes a single entry.
 	 *
-	 * @param key - The key associated with the item to be removed from the cache
+	 * @param key - The cache key
+	 * @returns `true` when an entry was removed
 	 */
-	delete(key: string): void {
-		this._cache.delete(key);
+	delete(key: string): boolean {
+		return this.entries.delete(key);
 	}
 
 	/**
-	 * Clears the entire cache, removing all cached data.
+	 * Removes every entry.
 	 */
 	clear(): void {
-		this._cache.clear();
+		this.entries.clear();
 	}
 
 	/**
-	 * Checks if the cached data is still valid based on the time-to-live (TTL) configuration
+	 * Lists live keys, pruning expired entries along the way.
 	 *
-	 * @param payload - The cache payload containing the data and its timestamp
-	 * @returns True if the data is still valid; false if it has expired based on the TTL
+	 * @returns The keys in LRU order (oldest first)
 	 */
-	isValid<Data>(payload: CacheNode<Data>): boolean {
-		return Date.now() - payload.timestamp < this.configuration.ttl!;
-	}
+	keys(): string[] {
+		const keys: string[] = [];
 
-	/**
-	 * This method is called after every successful get or set operation
-	 * It checks the cache size and evicts the least recently used item when necessary
-	 */
-	private evictLeastRecentlyUsed(): void {
-		if (this._cache.size <= this.configuration.maxSize!) return;
-
-		let lruKey: string | null = null;
-		let lruTimestamp = Number.MAX_VALUE;
-
-		for (const [key, node] of this._cache.entries()) {
-			if (node.timestamp < lruTimestamp) {
-				lruKey = key;
-				lruTimestamp = node.timestamp;
+		for (const [key, entry] of this.entries) {
+			if (this.isExpired(entry)) {
+				this.entries.delete(key);
+			} else {
+				keys.push(key);
 			}
 		}
 
-		if (lruKey) {
-			this._cache.delete(lruKey);
-		}
+		return keys;
 	}
 
 	/**
-	 * Moves the accessed payload to the front of the LRU list
-	 * This ensures that the most recently accessed item is closer to the front of the list
+	 * Checks whether an entry outlived its TTL.
 	 *
-	 * @param payload - The cache payload to be moved to the front
+	 * @param entry - The cache entry
+	 * @returns `true` when expired
 	 */
-	private moveToFront<Data>(payload: CacheNode<Data>): void {
-		// If there's only one item in the cache or the payload is already at the front, no need to move it
-		if (this._cache.size === 1 || JSON.stringify(payload) === JSON.stringify(this._cache.values().next().value)) return;
-
-		this._cache.delete(payload.key);
-		this._cache.set(payload.key, payload);
+	private isExpired(entry: Entry): boolean {
+		return Date.now() >= entry.expiresAt;
 	}
 }
