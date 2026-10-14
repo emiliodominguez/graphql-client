@@ -1,11 +1,13 @@
-# GraphQL Client
+![graphql-client: Your data. Precisely connected. A magenta and aluminum graph sculpture.](https://raw.githubusercontent.com/emiliodominguez/graphql-client/main/docs/assets/graphql-client-banner.jpg)
 
-[![CI](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml)
-![Size](https://img.shields.io/badge/min%2Bgzip-~6.8%20kB-blue)
-![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://img.shields.io/github/actions/workflow/status/emiliodominguez/graphql-client/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=161b22&logo=githubactions&logoColor=white)](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml)
+[![TypeScript: strict](https://img.shields.io/badge/TS-strict-3178c6?style=for-the-badge&labelColor=161b22&logo=typescript&logoColor=white)](./tsconfig.json)
+[![Runtime dependencies: 0](https://img.shields.io/badge/deps-0-2ea44f?style=for-the-badge&labelColor=161b22&logo=npm&logoColor=white)](./package.json)
+[![License: MIT](https://img.shields.io/badge/license-MIT-3da639?style=for-the-badge&labelColor=161b22&logo=opensourceinitiative&logoColor=white)](./LICENSE)
 
-A lightweight, zero-dependency, fully typed GraphQL client. It gives you the features of a heavier client in about 6.8 kB min+gzip, plus about 1.3 kB for the React hooks and about 1.5 kB for WebSockets.
+**A typed GraphQL client with zero runtime dependencies.**
+
+Caching, live queries, retries, subscriptions and streaming, with optional React hooks. Built on the Fetch API for browsers, Node.js, Deno, Bun and edge runtimes, with ESM and CommonJS builds.
 
 **Transport**
 

@@ -1,7 +1,7 @@
 {
 	"name": "@emiliodominguez/graphql-client",
 	"version": "1.0.0",
-	"description": "Lightweight, zero-dependency, fully typed GraphQL client: caching, live queries, React hooks, @defer/@stream, uploads, retries, middleware, persisted queries, and SSE/WebSocket subscriptions.",
+	"description": "Zero-dependency, typed GraphQL client with caching, request deduplication, retries, subscriptions, streaming and React hooks. Works with the Fetch API across runtimes.",
 	"keywords": [
 		"graphql",
 		"graphql-client",
