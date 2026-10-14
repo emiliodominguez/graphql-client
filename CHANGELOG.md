@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- Found by a seeded model-based fuzzer (now part of the test suite):
+    - An invalidation issued through another client sharing the cache (`extend()`) no longer lets live queries join a stale in-flight request.
+    - Live queries never show a response the cache rejected as superseded, since they read back the cache entry.
+    - With a cache configured, an optimistic update never adopts a live query's data as its base on a cache miss.
+    - Removing a layer from an invalidated entry makes its live queries refetch, so a rolled-back change can't stay visible.
+    - `fetchMore` merges onto the cache entry's current data, and drops the page if the entry was invalidated meanwhile.
+    - `no-cache` live queries apply pending layers on top of their own response instead of discarding it.
 - Optimistic layers on invalidated or expired entries no longer write their old base back. This covers a mutation's own `invalidates` on success, an invalidation while a layer is pending, and TTL expiry.
 - A throwing optimistic update no longer leaves an orphan layer entry behind.
 - `fetchMore` merges pages onto the real data, so pending optimistic layers stay layers.

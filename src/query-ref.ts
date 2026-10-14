@@ -32,6 +32,8 @@ export interface QueryHost<TData, TVariables> {
 	fetch(fetchPolicy: FetchPolicy): Promise<TData>;
 	/** Reads the cache synchronously when the cache allows it */
 	peek(): TData | undefined;
+	/** Reads the entry synchronously, whatever the fetch policy */
+	cached(): TData | undefined;
 	/** Whether a cache is configured (so a missing entry means it was invalidated or expired) */
 	hasCache(): boolean;
 	/** Current invalidation epoch */
@@ -206,6 +208,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	async fetchMore(options: FetchMoreOptions<TData, TVariables>): Promise<QueryState<TData>> {
 		// Supersedes any in-flight refetch, whose older page must not overwrite the merged result.
 		const version = ++this.#version;
+		const startedAt = this.#host.epoch();
 
 		this.#setState({ data: this.#state.data, error: undefined, loading: true });
 
@@ -215,7 +218,22 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			if (version !== this.#version) return this.#state;
 
 			// Merge onto the real data: pending optimistic layers must stay layers, not become part of the pages.
-			const current = this.#host.real(this.#state.data);
+			// Merge onto the entry's current data, not onto this ref's possibly outdated snapshot.
+			const writes = this.#options.fetchPolicy !== "no-cache" && this.#host.hasCache();
+			const entry = writes ? this.#host.cached() : this.#state.data;
+
+			if (
+				writes &&
+				(this.#host.invalidatedSince(startedAt) || (entry === undefined && this.#state.data !== undefined))
+			) {
+				// The entry was invalidated (or expired) meanwhile: its pages are no longer trusted, let a refetch win.
+				this.#stale = true;
+				this.#setState({ data: this.#state.data, error: undefined, loading: false });
+				if (this.#listeners.size > 0) void this.refetch();
+				return this.#state;
+			}
+
+			const current = this.#host.real(entry);
 			const merged = current === undefined ? next : options.merge(current, next);
 
 			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.

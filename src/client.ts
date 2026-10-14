@@ -151,7 +151,7 @@ export class Client {
 	/**
 	 * Pending queries keyed by their cache key, shared by identical concurrent calls.
 	 */
-	readonly #inFlight = new Map<string, Promise<unknown>>();
+	readonly #inFlight = new Map<string, { promise: Promise<unknown>; epoch: number }>();
 
 	/**
 	 * Memoized persisted-query hashes, keyed by document.
@@ -311,24 +311,29 @@ export class Client {
 		const writesCache = fetchPolicy !== "no-cache";
 		// Requests that write the cache and requests that must not are never merged.
 		const flightKey = writesCache ? cacheKey : `no-cache:${cacheKey}`;
-		const pending = canDedupe ? this.#inFlight.get(flightKey) : undefined;
+		const flight = canDedupe ? this.#inFlight.get(flightKey) : undefined;
+		// An invalidation issued through another client sharing the cache cannot clear this client's map.
+		const pending = flight && !this.#invalidatedSince(cacheKey, flight.epoch) ? flight.promise : undefined;
 
 		if (pending) {
 			this.#log(operation, "deduplicated");
 			return pending as Promise<TData>;
 		}
 
+		const epoch = sequence;
 		const request = this.#execute<TData, TVariables>(query, options, operation, cacheKey, writesCache);
 
 		if (!canDedupe) return request;
 
-		this.#inFlight.set(flightKey, request);
+		const entry = { promise: request, epoch };
+
+		this.#inFlight.set(flightKey, entry);
 
 		try {
 			return await request;
 		} finally {
 			// An invalidation may already have replaced this entry with a fresh request.
-			if (this.#inFlight.get(flightKey) === request) this.#inFlight.delete(flightKey);
+			if (this.#inFlight.get(flightKey) === entry) this.#inFlight.delete(flightKey);
 		}
 	}
 
@@ -460,8 +465,20 @@ export class Client {
 				async fetch(fetchPolicy: FetchPolicy): Promise<TData> {
 					const data = await client.gql<TData, TVariables>({ ...options, fetchPolicy });
 
+					// A superseded response is not stored: show what the entry holds now (optimistic layers included).
+					if (fetchPolicy !== "no-cache") {
+						const cached = await client.#configuration.cache?.get<TData>(cacheKey);
+
+						if (cached !== undefined) return cached;
+					}
+
 					// Pending optimistic layers stay visible on top of freshly fetched data.
 					return client.#overlay(cacheKey, data);
+				},
+				cached(): TData | undefined {
+					const cached = client.#configuration.cache?.get<TData>(cacheKey);
+
+					return cached instanceof Promise ? undefined : cached;
 				},
 				peek(): TData | undefined {
 					const cached = readsCache ? client.#configuration.cache?.get<TData>(cacheKey) : undefined;
@@ -992,6 +1009,12 @@ export class Client {
 				// An invalidated base is unknown: never fold into it, the refetch brings the truth.
 				if (commit && !entry.stale) entry.base = applyLayer(entry.base, layer);
 
+				// Watchers may show this layer on top of data that never reached the cache (a no-cache or failed
+				// refetch): make them refetch, joining the refetch the invalidation started when still in flight.
+				if (entry.stale) {
+					for (const watcher of [...(client.#shared.watchers.get(cacheKey) ?? [])]) watcher.invalidate();
+				}
+
 				if (entry.layers.length > 0) {
 					await client.#render(cacheKey, entry);
 					continue;
@@ -1012,9 +1035,10 @@ export class Client {
 				const cacheKey = this.#getCacheKey(target);
 				const existing = layers.get(cacheKey);
 				// Without a cache (or on a miss), live queries showing the entry still hold its current data.
-				const base = existing
-					? existing.base
-					: ((await this.#configuration.cache?.get(cacheKey)) ?? this.#peekWatchers(cacheKey));
+				const cache = this.#configuration.cache;
+				// With a cache, a miss means there is no real data: never adopt a live query's (possibly no-cache or
+				// invalidated) data as the base, it would be written to the cache when the layer settles.
+				const base = existing ? existing.base : cache ? await cache.get(cacheKey) : this.#peekWatchers(cacheKey);
 				// Another optimistic operation may have created the entry while the cache was read.
 				const entry = layers.get(cacheKey) ?? { base, layers: [], stale: false };
 				const layer: OptimisticLayer = { update };
@@ -1091,10 +1115,9 @@ export class Client {
 	#overlay<TData>(cacheKey: string, data: TData): TData {
 		const entry = this.#shared.layers.get(cacheKey);
 
-		if (!entry) return data;
-
-		// The fetched value may be a cache hit that already includes the layers: always render from the real data.
-		return entry.layers.reduce(applyLayer, entry.stale ? data : entry.base) as TData;
+		// Only ever called with real data (network results, no-cache fetches, merged pages): cache hits are read back
+		// from the cache, which already holds the layers.
+		return entry ? (entry.layers.reduce(applyLayer, data) as TData) : data;
 	}
 
 	/**
