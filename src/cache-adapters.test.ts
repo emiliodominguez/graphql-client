@@ -338,11 +338,12 @@ describe("async cache adapters", function () {
 			});
 
 		await tick();
-		// Real data arrives while the optimistic base is being read.
-		await client.write(target, { todos: ["v2"] });
+		// Real data arrives while the optimistic base is being read (it is queued behind the read).
+		const write = client.write(target, { todos: ["v2"] });
+
 		slowGet = false;
 		getGate.open();
-		await mutation;
+		await Promise.all([write, mutation]);
 
 		// The mutation failed: the layer is rolled back onto the NEWEST real data.
 		expect(await client.read(target)).toEqual({ todos: ["v2"] });

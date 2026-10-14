@@ -604,7 +604,7 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                 | Size    |
 | -------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken) | ~9.2 kB |
+| `Client` + `MemoryCache` (tree-shaken) | ~9.7 kB |
 | `lumenql/react`                        | ~1.8 kB |
 | `lumenql/ws`                           | ~1.8 kB |
 
@@ -621,6 +621,7 @@ yarn size          # bundle sizes + budget
 yarn bench         # hot-path micro-benchmarks (cache hits, live queries, reads)
 yarn check:exports # validates package exports/types for every resolution mode
 FUZZ_SEEDS=20000 yarn test src/fuzz.test.ts   # longer model-based fuzzing run (CI runs 1,000 seeds)
+HFUZZ_SEEDS=10000 yarn test src/fuzz-hostile.test.ts   # hostile fuzzing: async, reordering, failing caches (CI runs 300)
 yarn demo          # builds and runs examples/rick-and-morty.js
 ```
 

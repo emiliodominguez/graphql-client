@@ -85,10 +85,33 @@ interface SharedState {
 	floor: number;
 	/** Pending optimistic layers per cache key, rendered on top of the entry's real (base) data */
 	layers: Map<string, OptimisticEntry>;
-	/** Token of the newest store in progress per cache key (only that store may clean up after an invalidation) */
-	writing: Map<string, number>;
-	/** Optimistic base reads in progress per cache key, flagged when real data is stored meanwhile */
-	reading: Map<string, Set<{ dirty: boolean }>>;
+	/**
+	 * Per-key lanes: every cache operation on a key (stores, optimistic renders and rollbacks, invalidation deletes,
+	 * consistent reads) runs after the previous one settled. The cache and the live queries therefore always go
+	 * through the same states in the same order, whatever order an async cache adapter completes calls in.
+	 */
+	lanes: Map<string, Lane>;
+	/** Invalidations whose keys are still being listed or deleted */
+	invalidating: Set<CacheKey>;
+	/** While invalidations are in progress: sequence at which each key was last stored (newer data is kept) */
+	stored: Map<string, number>;
+	/**
+	 * Keys whose cache entry could not be cleaned up (a failed delete, e.g. while rolling back an optimistic layer):
+	 * what the cache holds for them is not trusted, they read as misses until a write or delete succeeds.
+	 */
+	untrusted: Set<string>;
+}
+
+/**
+ * Serializes the cache operations of one key.
+ */
+interface Lane {
+	/** Settles once every queued operation settled */
+	tail: Promise<void>;
+	/** Number of queued operations */
+	size: number;
+	/** Order of the newest data written by the lane */
+	order: number;
 }
 
 /**
@@ -104,6 +127,8 @@ interface OptimisticEntry {
 	 * the cache and successes are not folded into it.
 	 */
 	stale: boolean;
+	/** Order of the request (or write) that produced the base: `0` when it predates every pending operation */
+	order: number;
 }
 
 /**
@@ -112,6 +137,8 @@ interface OptimisticEntry {
 interface OptimisticLayer {
 	/** Computes the optimistic data from the data below it */
 	update(current: unknown): unknown;
+	/** Sequence when its operation started: real data requested later may already contain the operation's effect */
+	since: number;
 }
 
 /**
@@ -123,14 +150,12 @@ const INVALIDATION_LOG_SIZE = 64;
  * State shared by every copy of the library loaded in the process (e.g. its ESM and CJS builds, or two bundled
  * copies), so clients sharing a cache always share notifications and ordering:
  * - `states`: shared state per cache (or per client when it has no cache);
- * - `sequence`: monotonic counter ordering requests, writes and invalidations across every client;
- * - `stores`: counter identifying stores.
+ * - `sequence`: monotonic counter ordering requests, writes and invalidations across every client.
  */
 const registry = ((globalThis as Record<symbol, unknown>)[Symbol.for("lumenql.shared")] ??= {
 	states: new WeakMap(),
 	sequence: 0,
-	stores: 0,
-}) as { states: WeakMap<object, SharedState>; sequence: number; stores: number };
+}) as { states: WeakMap<object, SharedState>; sequence: number };
 
 /**
  * Shared state per cache (or per client when it has no cache).
@@ -160,8 +185,10 @@ function getSharedState(owner: object): SharedState {
 			invalidations: [],
 			floor: 0,
 			layers: new Map(),
-			writing: new Map(),
-			reading: new Map(),
+			lanes: new Map(),
+			invalidating: new Set(),
+			stored: new Map(),
+			untrusted: new Set(),
 		};
 		sharedStates.set(owner, state);
 	}
@@ -237,7 +264,7 @@ export class Client {
 			fetchPolicy === "cache-first" || fetchPolicy === "cache-only" || fetchPolicy === "cache-and-network";
 
 		if (cache && readsCache) {
-			const cached = await cache.get<TData>(cacheKey);
+			const cached = await this.#read<TData>(cacheKey);
 
 			if (cached !== undefined) {
 				this.#log(operation, "cache hit");
@@ -245,12 +272,23 @@ export class Client {
 				// Stale-while-revalidate: answer now, refresh the entry (and every live query) in the background.
 				// Failures are reported through `onError` by the request itself.
 				if (fetchPolicy === "cache-and-network") {
-					this.#request<TData, TVariables>(query, options, operation, cacheKey, "network-only", hasFiles).catch(
+					const client = this;
+
+					this.#request<TData, TVariables>(query, options, operation, cacheKey, "network-only", hasFiles).then(
+						function invalidateAfterRefresh(): Promise<void> {
+							return client.#applyInvalidates(options, {
+								...operation,
+								query,
+								variables: options.variables,
+								attempt: 0,
+							});
+						},
 						ignoreError,
 					);
 				}
 
-				return cached;
+				// Adapters may hand out fresh objects (e.g. StorageCache parses JSON): results are always frozen.
+				return deepFreeze(cached);
 			}
 		}
 
@@ -294,10 +332,19 @@ export class Client {
 				this.#report(settleError, context, options.signal);
 			}
 
+			// Only now: a refetch triggered by the invalidation must find the optimistic layers settled, or it would
+			// bring data already containing the mutation under a layer applying it again.
+			await this.#applyInvalidates(options, context);
+
 			return data;
 		} catch (error) {
-			// A failing rollback must never mask the operation's error.
-			await settle?.(false).catch(ignoreError);
+			// A failing rollback is reported, but never masks the operation's error.
+			try {
+				await settle?.(false);
+			} catch (settleError) {
+				this.#report(settleError, context, options.signal);
+			}
+
 			throw error;
 		}
 	}
@@ -340,8 +387,14 @@ export class Client {
 		// Requests that write the cache and requests that must not are never merged.
 		const flightKey = writesCache ? cacheKey : `no-cache:${cacheKey}`;
 		const flight = canDedupe ? this.#inFlight.get(flightKey) : undefined;
-		// An invalidation issued through another client sharing the cache cannot clear this client's map.
-		const pending = flight && !this.#invalidatedSince(cacheKey, flight.epoch) ? flight.promise : undefined;
+		// Never join a request older than an invalidation (issued through another client sharing the cache, it cannot
+		// clear this client's map) or than data applied since (a write): its response will not be stored.
+		const pending =
+			flight &&
+			!this.#invalidatedSince(cacheKey, flight.epoch) &&
+			(this.#shared.applied.get(cacheKey) ?? 0) <= flight.epoch
+				? flight.promise
+				: undefined;
 
 		if (pending) {
 			this.#log(operation, "deduplicated");
@@ -518,22 +571,61 @@ export class Client {
 			{
 				async fetch(fetchPolicy: FetchPolicy): Promise<TData> {
 					const data = await client.gql<TData, TVariables>({ ...options, fetchPolicy });
+					const cache = client.#configuration.cache;
 
-					// A superseded response is not stored: show what the entry holds now (optimistic layers included).
-					if (fetchPolicy !== "no-cache") {
-						const cached = await client.#configuration.cache?.get<TData>(cacheKey);
+					// A superseded response is not stored: show what the entry holds now (optimistic layers included),
+					// read in its lane, after the operations queued before.
+					if (fetchPolicy !== "no-cache" && cache) {
+						const cached = await client.#lane(cacheKey, async function read(): Promise<TData | undefined> {
+							return client.#read<TData>(cacheKey);
+						});
 
-						if (cached !== undefined) return cached;
+						if (cached !== undefined) return deepFreeze(cached);
 					}
 
 					// Pending optimistic layers stay visible on top of freshly fetched data.
 					return client.#overlay(cacheKey, data);
 				},
-				async cached(): Promise<TData | undefined> {
-					return client.#configuration.cache?.get<TData>(cacheKey);
+				merge(next: TData, merge: (current: TData, next: TData) => TData, since: number, expected: boolean) {
+					const cache = client.#configuration.cache;
+					// Ordered when queued: a write queued after the merge is newer, whenever the merge runs.
+					const order = ++registry.sequence;
+
+					// Read, merge and write in one step of the entry's lane: the pages are merged onto the newest real
+					// data (under any optimistic layers), never onto a snapshot another write replaced meanwhile.
+					return client.#lane(cacheKey, async function mergeInLane(): Promise<TData | undefined> {
+						const entry = client.#shared.layers.get(cacheKey);
+						const current = (entry ? entry.base : await client.#read(cacheKey)) as TData | undefined;
+
+						// Invalidated since the page was requested (or the real data under optimistic layers was), or
+						// expired while data was shown: the pages are no longer trusted, let a refetch win.
+						if (
+							client.#invalidatedSince(cacheKey, since) ||
+							entry?.stale ||
+							(current === undefined && expected && !entry)
+						) {
+							return undefined;
+						}
+
+						const merged = deepFreeze(current === undefined ? next : merge(current, next));
+
+						// In-flight responses for the entry are now older than the merged pages.
+						client.#supersede(cacheKey, order);
+
+						return (await client.#write(cacheKey, merged, since, order)) ? merged : undefined;
+					});
 				},
 				peek(): TData | undefined {
-					return readsCache ? syncValue(client.#configuration.cache?.get<TData>(cacheKey)) : undefined;
+					if (!readsCache) return undefined;
+
+					try {
+						if (client.#shared.untrusted.has(cacheKey)) return undefined;
+
+						return deepFreeze(syncValue(client.#configuration.cache?.get<TData>(cacheKey)));
+					} catch {
+						// A cache failing synchronously (e.g. Web Storage throwing) is a miss, like a rejected read.
+						return undefined;
+					}
 				},
 				hasCache(): boolean {
 					return client.#configuration.cache !== undefined;
@@ -557,9 +649,6 @@ export class Client {
 						fetchPolicy: "no-cache",
 						invalidates: undefined,
 					});
-				},
-				write(data: TData): Promise<void> {
-					return client.write<TData, TVariables>(options, data);
 				},
 				real(visible: TData | undefined): TData | undefined {
 					return client.#real(cacheKey, visible);
@@ -589,7 +678,7 @@ export class Client {
 	async read<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		target: WithVariables<CacheTarget<TData, TVariables>, TVariables>,
 	): Promise<TData | undefined> {
-		return this.#configuration.cache?.get<TData>(this.#getCacheKey(target));
+		return this.#read<TData>(this.#getCacheKey(target));
 	}
 
 	/**
@@ -607,9 +696,11 @@ export class Client {
 	): Promise<void> {
 		const cacheKey = this.#getCacheKey(target);
 
+		const order = ++registry.sequence;
+
 		// In-flight responses for this entry are now older than the written data.
-		this.#supersede(cacheKey, ++registry.sequence);
-		await this.#store(cacheKey, data);
+		this.#supersede(cacheKey, order);
+		await this.#store(cacheKey, data, order);
 	}
 
 	/**
@@ -629,7 +720,7 @@ export class Client {
 
 			// Never ship optimistic (unconfirmed) data in a snapshot: take the real data under pending layers.
 			const entry = this.#shared.layers.get(key);
-			const data = entry ? (entry.stale ? undefined : entry.base) : await cache.get(key);
+			const data = entry ? (entry.stale ? undefined : entry.base) : await this.#read(key);
 
 			if (data !== undefined) snapshot[key] = data;
 		}
@@ -643,7 +734,13 @@ export class Client {
 	 * @param snapshot - The snapshot
 	 */
 	async restore(snapshot: Record<string, unknown>): Promise<void> {
-		for (const [key, data] of Object.entries(snapshot)) await this.#store(key, data);
+		for (const [key, data] of Object.entries(snapshot)) {
+			const order = ++registry.sequence;
+
+			// Like `write`: in-flight responses for the entry are now older than the restored data.
+			this.#supersede(key, order);
+			await this.#store(key, data, order);
+		}
 	}
 
 	/**
@@ -679,17 +776,39 @@ export class Client {
 		if (shared.invalidations.length > INVALIDATION_LOG_SIZE) shared.floor = shared.invalidations.shift()!.epoch;
 
 		// Read after recording the invalidation: a response landing meanwhile is already superseded.
-		let keys: string[] = [];
+		const client = this;
+		let removed = 0;
 		let failure: { error: unknown } | undefined;
 
-		try {
-			keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
+		shared.invalidating.add(prefix);
 
-			for (const result of await Promise.allSettled(keys.map(removeFrom(cache!)))) {
+		/**
+		 * Deletes one key in its lane, unless data was stored for it after the invalidation was issued.
+		 *
+		 * @param key - The cache key
+		 * @returns Settles once deleted (or kept)
+		 */
+		function remove(key: string): Promise<void> {
+			return client.#lane(key, async function deleteKey(): Promise<void> {
+				if ((shared.stored.get(key) ?? -1) >= epoch) return;
+
+				await client.#drop(key);
+				removed++;
+			});
+		}
+
+		try {
+			const keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
+
+			for (const result of await Promise.allSettled(keys.map(remove))) {
 				if (result.status === "rejected") failure ??= { error: result.reason };
 			}
 		} catch (error) {
 			failure = { error };
+		} finally {
+			shared.invalidating.delete(prefix);
+
+			if (shared.invalidating.size === 0) shared.stored.clear();
 		}
 
 		// Live queries refetch even when the cache failed to drop their entries.
@@ -701,7 +820,7 @@ export class Client {
 
 		if (failure) throw failure.error;
 
-		return keys.length;
+		return removed;
 	}
 
 	/**
@@ -717,6 +836,26 @@ export class Client {
 	 */
 	extend(overrides: Partial<ClientConfiguration>): Client {
 		return new Client({ ...this.#configuration, ...overrides });
+	}
+
+	/**
+	 * Applies the `invalidates` prefixes of a successful operation. Each prefix is applied even when another one
+	 * fails; failures are reported, never turned into a rejection (the server already applied the operation).
+	 *
+	 * @param options - The request options
+	 * @param context - The operation metadata
+	 */
+	async #applyInvalidates(
+		options: Pick<RequestOptions<unknown, unknown>, "invalidates" | "signal">,
+		context: OperationContext,
+	): Promise<void> {
+		for (const prefix of options.invalidates ?? []) {
+			try {
+				await this.invalidate(prefix);
+			} catch (error) {
+				this.#report(error, context, options.signal);
+			}
+		}
 	}
 
 	/**
@@ -778,18 +917,9 @@ export class Client {
 				// The request succeeded: a failing cache is reported, never retried nor turned into a rejection (a
 				// mutation the server applied must not look failed and invite a non-idempotent retry).
 				try {
-					if (writesCache && this.#supersede(cacheKey, order)) await this.#store(cacheKey, data);
+					if (writesCache && this.#supersede(cacheKey, order)) await this.#store(cacheKey, data, order);
 				} catch (error) {
 					this.#report(error, context, options.signal);
-				}
-
-				// Each prefix is applied even when another one fails.
-				for (const prefix of options.invalidates ?? []) {
-					try {
-						await this.invalidate(prefix);
-					} catch (error) {
-						this.#report(error, context, options.signal);
-					}
 				}
 
 				return data;
@@ -1134,35 +1264,23 @@ export class Client {
 
 				entry.layers.splice(index, 1);
 
-				// An invalidated base is unknown: never fold into it, the refetch brings the truth.
-				if (commit && !entry.stale) entry.base = applyLayer(entry.base, layer);
+				// The operation succeeded: fold its layer into the real data, unless that data may already contain the
+				// effect (requested after the operation was sent: folding would apply it twice) or is unknown (never
+				// cached, or invalidated: a placeholder must never become real data, the refetch brings the truth).
+				if (commit && !entry.stale && entry.base !== undefined && entry.order < layer.since) {
+					entry.base = deepFreeze(applyLayer(entry.base, layer));
+				}
 
-				if (entry.layers.length === 0) layers.delete(cacheKey);
-
+				// The entry stays registered until its rollback ran in the lane: stores queued meanwhile must keep
+				// updating its base, or the rollback would render data older than theirs.
 				touched.set(cacheKey, entry);
 			}
 
 			for (const [cacheKey, entry] of touched) {
 				try {
-					// An invalidated entry is never rendered into the cache: show live queries the real data they fell
-					// back on (without the removed layers), then let them refetch, joining a refetch already in flight.
-					if (entry.stale) {
-						client.#retract(cacheKey, entry.layers.reduce(applyLayer, entry.base), true);
-						continue;
-					}
-
-					if (entry.layers.length > 0) {
-						await client.#render(cacheKey, entry);
-						continue;
-					}
-
-					// The last layer is gone: restore the real data. If the entry expired meanwhile, only live queries
-					// get it back (they would otherwise keep showing the removed layer); nothing is written to the cache.
-					const cache = client.#configuration.cache;
-					const expired = cache !== undefined && (await cache.get(cacheKey)) === undefined;
-
-					if (expired) client.#retract(cacheKey, entry.base, entry.base === undefined);
-					else await client.#render(cacheKey, entry);
+					await client.#lane(cacheKey, function rollBack(): Promise<void> {
+						return client.#settleEntry(cacheKey, entry);
+					});
 				} catch (error) {
 					failure ??= { error };
 				}
@@ -1171,31 +1289,50 @@ export class Client {
 			if (failure) throw failure.error;
 		}
 
+		/**
+		 * Applies one optimistic update in its entry's lane: reading the real data, registering the layer and rendering
+		 * it are one step no store, rollback or invalidation delete of the entry can interleave with.
+		 *
+		 * @param cacheKey - The serialized cache key
+		 * @param update - The optimistic update
+		 * @param since - The sequence when the operation started
+		 */
+		async function apply(cacheKey: string, update: OptimisticLayer["update"], since: number): Promise<void> {
+			const cache = client.#configuration.cache;
+			let entry = layers.get(cacheKey);
+
+			if (!entry) {
+				// With a cache, a miss means there is no real data: never adopt a live query's (possibly no-cache or
+				// invalidated) data as the base, it would be written to the cache when the layer settles. Without a
+				// cache, live queries showing the entry hold its current data.
+				const base = cache ? await client.#read(cacheKey) : client.#peekWatchers(cacheKey);
+				// Data read while (or before) an invalidation of the entry is deleted is no longer real: wait for the
+				// refetch instead of ever writing it back.
+				const stale = client.#isInvalidating(cacheKey) || client.#invalidatedSince(cacheKey, since);
+
+				// Data cached before the operation started cannot contain its effect (order `0`).
+				entry = { base: stale ? undefined : deepFreeze(base), layers: [], stale, order: 0 };
+			}
+
+			const layer: OptimisticLayer = { update, since };
+
+			// Validate the update before registering anything, so a throwing update leaves nothing behind.
+			update(entry.layers.reduce(applyLayer, entry.base));
+			layers.set(cacheKey, entry);
+			entry.layers.push(layer);
+			applied.push({ cacheKey, layer });
+			await client.#render(cacheKey, entry);
+		}
+
 		try {
+			const since = registry.sequence;
+
 			for (const { target, update } of updates) {
 				const cacheKey = this.#getCacheKey(target);
-				const existing = layers.get(cacheKey);
-				// Without a cache (or on a miss), live queries showing the entry still hold its current data.
-				const cache = this.#configuration.cache;
-				// With a cache, a miss means there is no real data: never adopt a live query's (possibly no-cache or
-				// invalidated) data as the base, it would be written to the cache when the layer settles.
-				let base = existing?.base;
 
-				if (!existing && cache) {
-					base = await this.#readBase(cacheKey, cache);
-				} else if (!existing) {
-					base = this.#peekWatchers(cacheKey);
-				}
-				// Another optimistic operation may have created the entry while the cache was read.
-				const entry = layers.get(cacheKey) ?? { base, layers: [], stale: false };
-				const layer: OptimisticLayer = { update };
-
-				// Validate the update before registering anything, so a throwing update leaves nothing behind.
-				update(entry.layers.reduce(applyLayer, entry.base));
-				layers.set(cacheKey, entry);
-				entry.layers.push(layer);
-				applied.push({ cacheKey, layer });
-				await this.#render(cacheKey, entry);
+				await this.#lane(cacheKey, function applyLayerInLane(): Promise<void> {
+					return apply(cacheKey, update, since);
+				});
 			}
 		} catch (error) {
 			await settle(false);
@@ -1211,86 +1348,221 @@ export class Client {
 	 *
 	 * @param cacheKey - The serialized cache key
 	 * @param data - The real data
+	 * @param order - The order of the response or write: older data than the lane already wrote is dropped
 	 */
-	async #store(cacheKey: string, data: unknown): Promise<void> {
-		const { layers, writing, reading } = this.#shared;
-		const entry = layers.get(cacheKey);
-		const cache = this.#configuration.cache;
+	#store(cacheKey: string, data: unknown, order: number): Promise<void> {
+		const client = this;
 		const epoch = registry.sequence;
-		const token = ++registry.stores;
 
 		deepFreeze(data);
-		writing.set(cacheKey, token);
+
+		return this.#lane(cacheKey, function store(): Promise<boolean> {
+			return client.#write(cacheKey, data, epoch, order);
+		}).then(ignoreError);
+	}
+
+	/**
+	 * Stores real data for an entry, in its lane.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param data - The (frozen) real data
+	 * @param epoch - The sequence when the data was issued: an invalidation after it drops the data
+	 * @param order - The order of the response or write
+	 * @returns Whether the data was stored
+	 */
+	async #write(cacheKey: string, data: unknown, epoch: number, order: number): Promise<boolean> {
+		const cache = this.#configuration.cache;
+		const entry = this.#shared.layers.get(cacheKey);
+		const lane = this.#shared.lanes.get(cacheKey)!;
+
+		// Invalidated after this store was issued: the data it carries is outdated, the refetch brings the truth.
+		if (this.#invalidatedSince(cacheKey, epoch)) return false;
+
+		// Queued before newer data (e.g. a response that passed its ordering check before a merge took a newer order)
+		// that the lane already wrote: older data never overwrites it.
+		if (order < lane.order) return false;
+
+		lane.order = order;
+
+		if (entry) {
+			entry.base = data;
+			entry.stale = false;
+			entry.order = order;
+			await this.#render(cacheKey, entry);
+			this.#landed(cacheKey, epoch);
+			return true;
+		}
+
+		await this.#put(cacheKey, data);
+
+		// Invalidated while a slow cache was writing (possibly after the invalidation listed the keys).
+		if (cache && this.#invalidatedSince(cacheKey, epoch)) {
+			await this.#drop(cacheKey);
+			return false;
+		}
+
+		this.#landed(cacheKey, epoch);
+		this.#notify(cacheKey, data);
+		return true;
+	}
+
+	/**
+	 * Records that newer data landed for a key while invalidations are listing keys, so they keep it.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param epoch - The sequence when the data was issued
+	 */
+	#landed(cacheKey: string, epoch: number): void {
+		const { invalidating, stored } = this.#shared;
+
+		if (invalidating.size > 0) stored.set(cacheKey, Math.max(stored.get(cacheKey) ?? -1, epoch));
+	}
+
+	/**
+	 * Runs a cache operation in its key's lane, once every previously queued operation on the key settled.
+	 * Operations running in a lane must never queue (and await) another operation on the same key.
+	 *
+	 * @template T - The result type
+	 * @param cacheKey - The serialized cache key
+	 * @param operation - The operation
+	 * @returns The operation's result
+	 */
+	#lane<T>(cacheKey: string, operation: () => Promise<T>): Promise<T> {
+		const { lanes } = this.#shared;
+		const lane = lanes.get(cacheKey) ?? { tail: Promise.resolve(), size: 0, order: 0 };
+		const result = lane.tail.then(operation);
+
+		lane.size++;
+		lane.tail = result.then(ignoreError, ignoreError).then(function release(): void {
+			if (--lane.size === 0 && lanes.get(cacheKey) === lane) lanes.delete(cacheKey);
+		});
+		lanes.set(cacheKey, lane);
+
+		return result;
+	}
+
+	/**
+	 * Writes a value to the cache. A failed write drops the entry (best effort): the cache must never keep serving
+	 * the previous value, e.g. an optimistic layer being rolled back.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param value - The value
+	 */
+	async #put(cacheKey: string, value: unknown): Promise<void> {
+		const cache = this.#configuration.cache;
 
 		try {
-			if (entry) {
-				entry.base = data;
-				entry.stale = false;
-				await this.#render(cacheKey, entry);
-				return;
-			}
+			await cache?.set(cacheKey, value);
+			this.#shared.untrusted.delete(cacheKey);
+		} catch (error) {
+			// Best effort; when even that fails, the key reads as a miss until a write to it succeeds.
+			await this.#drop(cacheKey).catch(ignoreError);
 
-			await cache?.set(cacheKey, data);
-
-			// An invalidation issued while a slow cache was writing wins: the data it was meant to drop goes too,
-			// unless a newer store owns the entry by now.
-			if (cache && this.#invalidatedSince(cacheKey, epoch)) {
-				if (writing.get(cacheKey) === token) await cache.delete(cacheKey);
-				return;
-			}
-
-			// An optimistic layer applied while the cache was writing sits on older data: this is its base now.
-			const late = layers.get(cacheKey);
-
-			if (late) {
-				late.base = data;
-				late.stale = false;
-				await this.#render(cacheKey, late);
-				return;
-			}
-
-			this.#notify(cacheKey, data);
-		} finally {
-			if (writing.get(cacheKey) === token) writing.delete(cacheKey);
-
-			for (const read of reading.get(cacheKey) ?? []) read.dirty = true;
+			throw error;
 		}
 	}
 
 	/**
-	 * Reads the real data an optimistic layer goes on top of, re-reading (a few times at most) when real data was
-	 * stored meanwhile: a rollback must never restore older data.
+	 * Reads a cache entry. Keys whose cleanup failed read as misses: the cache may still hold data the client meant
+	 * to remove (e.g. a rolled-back optimistic layer).
+	 *
+	 * @template T - The value type
+	 * @param cacheKey - The serialized cache key
+	 * @returns The cached value
+	 */
+	async #read<T>(cacheKey: string): Promise<T | undefined> {
+		if (this.#shared.untrusted.has(cacheKey)) return undefined;
+
+		return this.#configuration.cache?.get<T>(cacheKey);
+	}
+
+	/**
+	 * Deletes a cache entry. A failed delete leaves the key untrusted (read as a miss) until a write or delete of it
+	 * succeeds.
 	 *
 	 * @param cacheKey - The serialized cache key
-	 * @param cache - The cache
-	 * @returns The real data, if any
 	 */
-	async #readBase(cacheKey: string, cache: CacheAdapter): Promise<unknown> {
-		const { reading } = this.#shared;
-		const read = { dirty: true };
-		const reads = reading.get(cacheKey) ?? new Set();
-		let base: unknown;
-
-		reads.add(read);
-		reading.set(cacheKey, reads);
+	async #drop(cacheKey: string): Promise<void> {
+		const { untrusted } = this.#shared;
 
 		try {
-			for (let attempt = 0; read.dirty && attempt < 5; attempt++) {
-				read.dirty = false;
-				base = await cache.get(cacheKey);
-			}
-		} finally {
-			reads.delete(read);
+			await this.#configuration.cache?.delete(cacheKey);
+			untrusted.delete(cacheKey);
+		} catch (error) {
+			untrusted.add(cacheKey);
+			throw error;
+		}
+	}
 
-			if (reads.size === 0) reading.delete(cacheKey);
+	/**
+	 * Shows an entry's state once optimistic layers were removed from it (in its lane).
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param entry - The optimistic entry
+	 */
+	async #settleEntry(cacheKey: string, entry: OptimisticEntry): Promise<void> {
+		const { layers } = this.#shared;
+
+		// Another settlement already showed this entry's final state and handed it back to the cache: rendering the
+		// detached entry again would overwrite whatever was stored since.
+		if (layers.get(cacheKey) !== entry) return;
+
+		// Whether this rollback shows the entry's final state (another settlement may empty it while this one renders:
+		// that one then shows the final state).
+		const final = entry.layers.length === 0;
+
+		try {
+			await this.#showSettled(cacheKey, entry);
+		} finally {
+			// Unless a new layer was applied meanwhile, the entry holds real data only: the cache takes over.
+			if (final && entry.layers.length === 0 && layers.get(cacheKey) === entry) layers.delete(cacheKey);
+		}
+	}
+
+	/**
+	 * Renders (or retracts) an entry whose layers were just removed.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param entry - The optimistic entry
+	 */
+	async #showSettled(cacheKey: string, entry: OptimisticEntry): Promise<void> {
+		// An invalidated entry is never rendered into the cache: show live queries the real data they fell back on
+		// (without the removed layers), then let them refetch, joining a refetch already in flight.
+		if (entry.stale) {
+			this.#retract(cacheKey, entry.layers.reduce(applyLayer, entry.base), true);
+			return;
 		}
 
-		return base;
+		if (entry.layers.length > 0) {
+			await this.#render(cacheKey, entry);
+			return;
+		}
+
+		// The last layer is gone: restore the real data. If the entry expired meanwhile, only live queries get it
+		// back (they would otherwise keep showing the removed layer); nothing is written to the cache.
+		const cache = this.#configuration.cache;
+		const expired = cache !== undefined && (await this.#read(cacheKey)) === undefined;
+
+		if (expired) this.#retract(cacheKey, entry.base, entry.base === undefined);
+		else await this.#render(cacheKey, entry);
+	}
+
+	/**
+	 * Whether an invalidation covering a key is still listing or deleting keys.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @returns `true` while such an invalidation is in progress
+	 */
+	#isInvalidating(cacheKey: string): boolean {
+		for (const prefix of this.#shared.invalidating) if (matchesKeyPrefix(cacheKey, prefix)) return true;
+
+		return false;
 	}
 
 	/**
 	 * Writes an entry's visible data (base plus optimistic layers) without superseding in-flight real responses,
 	 * which keep updating the base. An entry left without any data is dropped and its watchers refetch.
+	 * Runs in the entry's lane.
 	 *
 	 * @param cacheKey - The serialized cache key
 	 * @param entry - The optimistic entry
@@ -1302,13 +1574,20 @@ export class Client {
 		const visible = deepFreeze(entry.layers.reduce(applyLayer, entry.base));
 
 		if (visible === undefined) {
-			await this.#configuration.cache?.delete(cacheKey);
+			await this.#drop(cacheKey);
 			this.#retract(cacheKey, undefined, true);
 
 			return;
 		}
 
-		await this.#configuration.cache?.set(cacheKey, visible);
+		await this.#put(cacheKey, visible);
+
+		// Invalidated while the cache was writing: the invalidation may have listed the keys before this write landed.
+		if (entry.stale) {
+			await this.#drop(cacheKey);
+			return;
+		}
+
 		this.#notify(cacheKey, visible);
 	}
 
@@ -1321,6 +1600,8 @@ export class Client {
 	 * @param refetch - Whether the live queries should refetch
 	 */
 	#retract(cacheKey: string, data: unknown, refetch: boolean): void {
+		deepFreeze(data);
+
 		for (const watcher of [...(this.#shared.watchers.get(cacheKey) ?? [])]) {
 			watcher.replace(data);
 			if (refetch) watcher.invalidate();
@@ -1340,7 +1621,7 @@ export class Client {
 
 		// Only ever called with real data (network results, no-cache fetches, merged pages): cache hits are read back
 		// from the cache, which already holds the layers.
-		return entry ? (entry.layers.reduce(applyLayer, data) as TData) : data;
+		return deepFreeze(entry ? (entry.layers.reduce(applyLayer, data) as TData) : data);
 	}
 
 	/**
@@ -1710,19 +1991,6 @@ function syncValue<T>(value: T | Promise<T> | undefined): T | undefined {
 	Promise.resolve(value).catch(ignoreError);
 
 	return undefined;
-}
-
-/**
- * Creates a `map` callback deleting keys from a cache.
- *
- * @param cache - The cache
- * @returns The callback
- */
-function removeFrom(cache: CacheAdapter): (key: string) => unknown {
-	return async function remove(key: string): Promise<void> {
-		// Async: a synchronous throw becomes a rejection instead of skipping the remaining keys.
-		await cache.delete(key);
-	};
 }
 
 /**

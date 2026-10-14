@@ -34,8 +34,16 @@ export interface QueryHost<TData, TVariables> {
 	fetch(fetchPolicy: FetchPolicy): Promise<TData>;
 	/** Reads the cache synchronously when the cache allows it */
 	peek(): TData | undefined;
-	/** Reads the entry, whatever the fetch policy */
-	cached(): Promise<TData | undefined>;
+	/**
+	 * Merges a page into the entry's newest real data and stores the result, atomically for the entry.
+	 * Resolves `undefined` when the entry was invalidated since `since` or expired although data was `expected`.
+	 */
+	merge(
+		next: TData,
+		merge: (current: TData, next: TData) => TData,
+		since: number,
+		expected: boolean,
+	): Promise<TData | undefined>;
 	/** Whether a cache is configured (so a missing entry means it was invalidated or expired) */
 	hasCache(): boolean;
 	/** Whether the entry currently has pending optimistic layers */
@@ -48,8 +56,6 @@ export interface QueryHost<TData, TVariables> {
 	register(watcher: QueryWatcher<TData>): () => void;
 	/** Fetches the same document with extra variables, bypassing the cache */
 	fetchMore(variables: Partial<TVariables> | undefined): Promise<TData>;
-	/** Stores data for this query's entry and notifies every watcher of it */
-	write(data: TData): Promise<void>;
 	/** The real data under pending optimistic layers (or `visible` when there are none) */
 	real(visible: TData | undefined): TData | undefined;
 	/** Applies pending optimistic layers on top of real data */
@@ -123,6 +129,17 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	#fetched = false;
 
 	/**
+	 * Number of times the cache pushed data to this query: a fetch completing after a push keeps the pushed data.
+	 */
+	#pushes = 0;
+
+	/**
+	 * Version of the refetch an invalidation started, while it runs: a page fetched meanwhile was requested against
+	 * outdated data and must not supersede it.
+	 */
+	#refreshing = 0;
+
+	/**
 	 * The client bridge.
 	 */
 	readonly #host: QueryHost<TData, TVariables>;
@@ -189,7 +206,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		if (!this.#active) this.#activate();
 		// Resubscribed during the deactivation grace period after an invalidation: catch up now.
-		else if (this.#listeners.size === 1 && this.#stale) void this.refetch();
+		else if (this.#listeners.size === 1 && this.#stale) this.#refresh();
 
 		return this.#createUnsubscribe(listener);
 	}
@@ -222,6 +239,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		// Supersedes any in-flight refetch, whose older page must not overwrite the merged result.
 		const version = ++this.#version;
 		const startedAt = this.#host.epoch();
+		const refreshing = this.#refreshing !== 0;
 
 		this.#setState({ data: this.#state.data, error: undefined, loading: true });
 
@@ -230,15 +248,40 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 			if (version !== this.#version) return this.#state;
 
-			// Merge onto the real data: pending optimistic layers must stay layers, not become part of the pages.
-			// Merge onto the entry's current data, not onto this ref's possibly outdated snapshot.
-			const writes = this.#options.fetchPolicy !== "no-cache" && this.#host.hasCache();
-			const entry = writes ? await this.#host.cached() : this.#state.data;
+			// Started while an invalidation's refetch was running: the page belongs to outdated data, let a refetch win.
+			if (refreshing) {
+				this.#setState({ data: this.#state.data, error: undefined, loading: false });
+				if (this.#listeners.size > 0) this.#refresh();
+				return this.#state;
+			}
 
-			if (
-				writes &&
-				(this.#host.invalidatedSince(startedAt) || (entry === undefined && this.#state.data !== undefined))
-			) {
+			const writes = this.#options.fetchPolicy !== "no-cache" && this.#host.hasCache();
+
+			/**
+			 * Applies the caller's merge. Results are frozen: the readonly views handed to it are the same objects.
+			 *
+			 * @param current - The current (real) data
+			 * @param page - The fetched page
+			 * @returns The merged data
+			 */
+			function mergePage(current: TData, page: TData): TData {
+				return options.merge(current as DeepReadonly<TData>, page as DeepReadonly<TData>) as TData;
+			}
+
+			if (!writes) {
+				// `no-cache` queries never touch the cache: the merged pages stay local to this ref, under any layers.
+				const current = this.#host.real(this.#state.data);
+				const merged = current === undefined ? next : mergePage(current, next);
+
+				this.#optimistic = this.#host.optimistic();
+				this.#setState({ data: this.#host.overlay(merged), error: undefined, loading: false });
+				return this.#state;
+			}
+
+			const pushes = this.#pushes;
+			const merged = await this.#host.merge(next, mergePage, startedAt, this.#state.data !== undefined);
+
+			if (merged === undefined) {
 				// The entry was invalidated (or expired) meanwhile: its pages are no longer trusted, let a refetch win.
 				this.#stale = true;
 				this.#setState({ data: this.#state.data, error: undefined, loading: false });
@@ -246,18 +289,13 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 				return this.#state;
 			}
 
-			const current = this.#host.real(entry);
-			// Results are frozen: the readonly views handed to `merge` are the same objects.
-			const merged =
-				current === undefined
-					? next
-					: (options.merge(current as DeepReadonly<TData>, next as DeepReadonly<TData>) as TData);
-
-			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.
-			if (this.#options.fetchPolicy !== "no-cache") await this.#host.write(merged);
-
 			this.#optimistic = this.#host.optimistic();
-			this.#setState({ data: this.#host.overlay(merged), error: undefined, loading: false });
+			// The write pushed the merge (and anything newer) to this ref: keep it, never overwrite newer data.
+			this.#setState({
+				data: this.#pushes !== pushes ? this.#state.data : this.#host.overlay(merged),
+				error: undefined,
+				loading: false,
+			});
 		} catch (error) {
 			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
 		}
@@ -299,6 +337,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		this.#teardowns.push(
 			this.#host.register({
 				receive(data: TData): void {
+					ref.#pushes++;
 					ref.#fetched = true;
 					ref.#optimistic = ref.#host.optimistic();
 					ref.#setState({ data, error: undefined, loading: ref.#state.loading });
@@ -307,12 +346,13 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 					return ref.#state.data;
 				},
 				replace(data: TData | undefined): void {
+					ref.#pushes++;
 					ref.#optimistic = ref.#host.optimistic();
 					ref.#setState({ data, error: ref.#state.error, loading: ref.#state.loading });
 				},
 				invalidate(): void {
 					ref.#stale = true;
-					if (ref.#listeners.size > 0) void ref.refetch();
+					if (ref.#listeners.size > 0) ref.#refresh();
 				},
 			}),
 		);
@@ -416,6 +456,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 */
 	async #fetch(fetchPolicy: FetchPolicy): Promise<QueryState<TData>> {
 		const version = ++this.#version;
+		const pushes = this.#pushes;
 
 		this.#stale = false;
 		this.#freshAsOf = this.#host.epoch();
@@ -427,13 +468,29 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			if (version === this.#version) {
 				this.#fetched = true;
 				this.#optimistic = this.#host.optimistic();
-				this.#setState({ data, error: undefined, loading: false });
+				// Data pushed by the cache while fetching (this fetch's own result, a newer write, a rollback) is at
+				// least as recent as the fetch's result: it wins.
+				this.#setState({
+					data: this.#pushes !== pushes ? this.#state.data : data,
+					error: undefined,
+					loading: false,
+				});
 			}
 		} catch (error) {
 			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
+		} finally {
+			if (this.#refreshing === version) this.#refreshing = 0;
 		}
 
 		return this.#state;
+	}
+
+	/**
+	 * Refetches because the data is outdated (invalidated), remembering it until that refetch settles.
+	 */
+	#refresh(): void {
+		void this.refetch();
+		this.#refreshing = this.#version;
 	}
 
 	/**
