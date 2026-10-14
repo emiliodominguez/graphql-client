@@ -5,7 +5,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-A lightweight, zero-dependency, fully typed GraphQL client. It gives you the features of a heavier client in about 6 kB min+gzip, plus about 1.2 kB for the React hooks.
+A lightweight, zero-dependency, fully typed GraphQL client. It gives you the features of a heavier client in about 6 kB min+gzip, plus about 1.2 kB for the React hooks and about 1.5 kB for WebSockets.
 
 **Transport**
 
@@ -16,7 +16,7 @@ A lightweight, zero-dependency, fully typed GraphQL client. It gives you the fea
 - **Automatic Persisted Queries and GET.** Send small hashed requests that a CDN can cache. `minify()` shortens documents further.
 - **File uploads.** Follows the GraphQL multipart request spec, and switches on automatically when variables contain a `File` or `Blob`.
 - **`@defer` / `@stream`.** Incremental delivery over `multipart/mixed` or SSE, in both the current and the 2022 payload formats.
-- **Subscriptions over SSE.** `for await` over GraphQL-over-SSE streams, with no WebSocket library.
+- **Subscriptions over SSE or WebSocket.** GraphQL over SSE built in, or a zero-dependency `graphql-transport-ws` transport (`/ws`, ~1.5 kB) with reconnects and keep-alive. Any other transport plugs in the same way.
 
 **Data**
 
@@ -37,7 +37,7 @@ A lightweight, zero-dependency, fully typed GraphQL client. It gives you the fea
 
 ## Contents
 
-[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [API](#api) · [Size](#size)
+[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [WebSocket](#websocket-subscriptions) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [API](#api) · [Size](#size)
 
 ## Install
 
@@ -387,6 +387,33 @@ for await (const { messageAdded } of client.subscribe({ query: ON_MESSAGE, varia
 
 This implements [GraphQL over SSE](https://github.com/enisdenjo/graphql-sse/blob/master/PROTOCOL.md) in "distinct connections" mode, which GraphQL Yoga, Hot Chocolate and `graphql-sse` all support. Breaking out of the loop or aborting `signal` closes the connection. Headers, auth and middleware apply as usual.
 
+## WebSocket subscriptions
+
+`/ws` is a zero-dependency implementation of the [`graphql-transport-ws`](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md) protocol, as used by the `graphql-ws` library and supported by Apollo Server, GraphQL Yoga, Hasura, Mercurius and Hot Chocolate. Plug it in as the `subscriptionTransport`, and `client.subscribe()` and `useSubscription()` use it for `subscription` operations:
+
+```ts
+import { Client } from "@emiliodominguez/graphql-client";
+import { createWebSocketTransport } from "@emiliodominguez/graphql-client/ws";
+
+const client = new Client({
+	url: "https://api.example.com/graphql",
+	subscriptionTransport: createWebSocketTransport({
+		url: "wss://api.example.com/graphql",
+		connectionParams: async function getParams() {
+			return { authorization: `Bearer ${await getToken()}` }; // evaluated on every (re)connect
+		},
+		keepAlive: 15_000, // ping every 15s and reconnect if no pong arrives
+	}),
+});
+```
+
+- **One socket** carries every subscription. It opens lazily and closes when the last subscription ends (`lazyCloseTimeout`).
+- **Reconnects** with exponential backoff (`retryAttempts`, `retryDelay`) and **resubscribes** active operations. Fatal close codes, such as 4401 or 4403 for auth, fail the subscriptions instead of retrying.
+- **Server errors** surface as `ClientError`s with `status: 0` and no `response`.
+- **Custom runtimes:** pass `WebSocket` (for example the `ws` package) when there is no global `WebSocket`. Call `transport.dispose()` to shut it down.
+
+Need another protocol (Phoenix, Ably, Pusher)? Implement `SubscriptionTransport`: a `subscribe(request, signal)` method that returns an `AsyncIterable` of GraphQL results.
+
 ## Abort and timeouts
 
 ```ts
@@ -422,20 +449,21 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 ### `new Client(configuration)`
 
-| Option             | Type                                             | Default            | Description                                     |
-| ------------------ | ------------------------------------------------ | ------------------ | ----------------------------------------------- |
-| `url`              | `string`                                         | (required)         | GraphQL endpoint.                               |
-| `authToken`        | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.        |
-| `headers`          | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                |
-| `cache`            | `Cache`                                          | none (no caching)  | Result cache.                                   |
-| `fetch`            | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch for SSR, tests or instrumentation. |
-| `timeout`          | `number` (ms)                                    | none               | Default request timeout.                        |
-| `dedupe`           | `boolean`                                        | `true`             | Share in-flight identical queries.              |
-| `retry`            | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).          |
-| `middleware`       | `Middleware[]`                                   | `[]`               | Request/response middleware.                    |
-| `method`           | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                        |
-| `persistedQueries` | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                    |
-| `debug`            | `boolean`                                        | `false`            | Log operations, timings and cache hits.         |
+| Option                  | Type                                             | Default            | Description                                     |
+| ----------------------- | ------------------------------------------------ | ------------------ | ----------------------------------------------- |
+| `url`                   | `string`                                         | (required)         | GraphQL endpoint.                               |
+| `authToken`             | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.        |
+| `headers`               | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                |
+| `cache`                 | `Cache`                                          | none (no caching)  | Result cache.                                   |
+| `fetch`                 | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch for SSR, tests or instrumentation. |
+| `timeout`               | `number` (ms)                                    | none               | Default request timeout.                        |
+| `dedupe`                | `boolean`                                        | `true`             | Share in-flight identical queries.              |
+| `retry`                 | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).          |
+| `middleware`            | `Middleware[]`                                   | `[]`               | Request/response middleware.                    |
+| `method`                | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                        |
+| `persistedQueries`      | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                    |
+| `subscriptionTransport` | `SubscriptionTransport`                          | SSE over `fetch`   | Transport for `subscription` operations.        |
+| `debug`                 | `boolean`                                        | `false`            | Log operations, timings and cache hits.         |
 
 ### Methods
 
@@ -478,6 +506,7 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 | --------------------------------------- | ------- |
 | `Client` + `MemoryCache` (tree-shaken)  | ~6.1 kB |
 | `@emiliodominguez/graphql-client/react` | ~1.2 kB |
+| `@emiliodominguez/graphql-client/ws`    | ~1.5 kB |
 
 ## Development
 
@@ -490,6 +519,14 @@ yarn build         # ESM + CJS + .d.ts via tsup
 yarn size          # bundle sizes + budget
 yarn demo          # builds and runs examples/rick-and-morty.js
 ```
+
+### Releasing
+
+1. Add an `NPM_TOKEN` repository secret (an npm automation token).
+2. Bump `version` in `package.json`, update the CHANGELOG and push.
+3. Publish a GitHub release tagged `v<version>`.
+
+The release workflow checks that the tag matches the package version, runs the full check suite, and publishes to npm with provenance.
 
 ## License
 

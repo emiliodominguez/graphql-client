@@ -17,7 +17,7 @@ const TYPICAL_IMPORT = 'import { Client, MemoryCache } from "./dist/index.js"; c
  * and fails when the typical import exceeds the budget.
  */
 function main() {
-	for (const file of ["dist/index.js", "dist/index.cjs", "dist/react.js"]) {
+	for (const file of ["dist/index.js", "dist/index.cjs", "dist/react.js", "dist/ws.js"]) {
 		report(file, transformSync(readFileSync(file, "utf8"), { minify: true, loader: "js" }).code);
 	}
 

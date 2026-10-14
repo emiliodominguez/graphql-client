@@ -67,7 +67,9 @@ export function isRetryable(error: unknown, context: OperationContext): boolean 
  * @returns Delay in milliseconds
  */
 function defaultDelay(retry: number, error: unknown): number {
-	const retryAfter = isClientError(error) ? parseRetryAfter(error.response.headers.get("Retry-After")) : undefined;
+	const retryAfter = isClientError(error)
+		? parseRetryAfter(error.response?.headers.get("Retry-After") ?? null)
+		: undefined;
 
 	if (retryAfter !== undefined) return Math.min(retryAfter, MAX_DELAY);
 

@@ -25,6 +25,8 @@ export type {
 	RequestOptions,
 	RetryOptions,
 	SubscribeOptions,
+	SubscriptionRequest,
+	SubscriptionTransport,
 	TypedDocumentString,
 	WatchOptions,
 } from "./types";

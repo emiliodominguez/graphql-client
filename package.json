@@ -1,7 +1,7 @@
 {
 	"name": "@emiliodominguez/graphql-client",
 	"version": "1.0.0",
-	"description": "Lightweight, zero-dependency, fully typed GraphQL client: LRU caching, deduplication, retries, middleware, persisted queries, SSE subscriptions and typed errors.",
+	"description": "Lightweight, zero-dependency, fully typed GraphQL client: caching, live queries, React hooks, @defer/@stream, uploads, retries, middleware, persisted queries, and SSE/WebSocket subscriptions.",
 	"keywords": [
 		"graphql",
 		"graphql-client",
@@ -34,7 +34,10 @@
 		"live-queries",
 		"defer",
 		"stream",
-		"file-upload"
+		"file-upload",
+		"websocket",
+		"graphql-ws",
+		"subscriptions-transport"
 	],
 	"author": "Emilio Dominguez",
 	"license": "MIT",
@@ -71,6 +74,16 @@
 				"default": "./dist/react.cjs"
 			}
 		},
+		"./ws": {
+			"import": {
+				"types": "./dist/ws.d.ts",
+				"default": "./dist/ws.js"
+			},
+			"require": {
+				"types": "./dist/ws.d.cts",
+				"default": "./dist/ws.cjs"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"files": [
@@ -79,6 +92,10 @@
 	"sideEffects": false,
 	"engines": {
 		"node": ">=20"
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
 	},
 	"scripts": {
 		"build": "tsup",
@@ -107,6 +124,7 @@
 		"@types/node": "^22",
 		"@types/react": "^19",
 		"@types/react-dom": "^19",
+		"@types/ws": "^8.18.2",
 		"@vitest/coverage-v8": "^5.0.4",
 		"esbuild": "^0.27.7",
 		"happy-dom": "^21.0.1",
@@ -116,6 +134,7 @@
 		"tsup": "^8.5.1",
 		"typescript": "^5.9",
 		"vite": "^8.3.4",
-		"vitest": "^5.0.4"
+		"vitest": "^5.0.4",
+		"ws": "^8.22.0"
 	}
 }

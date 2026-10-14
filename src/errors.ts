@@ -4,14 +4,14 @@ import type { GraphQLFormattedError } from "./types";
  * Details attached to a {@link ClientError}.
  */
 export interface ClientErrorDetails {
-	/** HTTP status code of the response */
+	/** HTTP status code of the response, or `0` for non-HTTP transports (e.g. WebSocket) */
 	status: number;
 	/** GraphQL errors returned by the server, if any */
 	errors?: ReadonlyArray<GraphQLFormattedError>;
 	/** Partial data returned alongside the errors, if any */
 	data?: unknown;
-	/** The raw fetch Response */
-	response: Response;
+	/** The raw fetch Response, absent for non-HTTP transports */
+	response?: Response;
 	/** Underlying error (e.g. a JSON parse failure) */
 	cause?: unknown;
 }
@@ -21,7 +21,7 @@ export interface ClientErrorDetails {
  * Transport failures (DNS, CORS, offline) and aborts are not wrapped and propagate as thrown by `fetch`.
  */
 export class ClientError extends Error {
-	/** HTTP status code of the response */
+	/** HTTP status code of the response, or `0` for non-HTTP transports (e.g. WebSocket) */
 	readonly status: number;
 
 	/** GraphQL errors returned by the server. Empty when the failure is not GraphQL-level. */
@@ -30,8 +30,8 @@ export class ClientError extends Error {
 	/** Partial data returned alongside the errors, if any */
 	readonly data: unknown;
 
-	/** The raw fetch Response */
-	readonly response: Response;
+	/** The raw fetch Response, absent for non-HTTP transports */
+	readonly response: Response | undefined;
 
 	/**
 	 * @param message - Human-readable summary

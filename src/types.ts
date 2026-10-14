@@ -134,6 +134,38 @@ export interface ClientConfiguration {
 	method?: "GET" | "POST";
 	/** Automatic Persisted Queries: send a SHA-256 hash first and the full document only when the server asks. */
 	persistedQueries?: boolean | PersistedQueriesOptions;
+	/**
+	 * Transport for `subscription` operations (e.g. the WebSocket transport from `/ws`).
+	 * Defaults to GraphQL over SSE through `fetch`.
+	 */
+	subscriptionTransport?: SubscriptionTransport;
+}
+
+/**
+ * The operation sent through a {@link SubscriptionTransport}.
+ */
+export interface SubscriptionRequest {
+	/** The GraphQL document */
+	query: string;
+	/** Operation variables */
+	variables?: unknown;
+	/** The selected operation name */
+	operationName?: string;
+}
+
+/**
+ * Pluggable streaming transport (WebSocket, Phoenix channels, Ably...). It yields raw GraphQL results (or
+ * incremental payloads); the client merges them and turns GraphQL errors into `ClientError`s.
+ */
+export interface SubscriptionTransport {
+	/**
+	 * Starts an operation. The iterable must stop and release resources when `signal` aborts.
+	 *
+	 * @param request - The operation
+	 * @param signal - Aborted when the consumer stops listening
+	 * @returns The results
+	 */
+	subscribe(request: SubscriptionRequest, signal: AbortSignal): AsyncIterable<GraphQLResponse<unknown>>;
 }
 
 /**

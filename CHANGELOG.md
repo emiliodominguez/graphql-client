@@ -4,6 +4,9 @@
 
 ### Added
 
+- WebSocket transport (`@emiliodominguez/graphql-client/ws`), a zero-dependency implementation of `graphql-transport-ws`. It shares one socket across subscriptions, connects and closes lazily, takes async `connectionParams`, and supports ack timeout, ping/pong keep-alive, and reconnect with resubscribe.
+- A pluggable `subscriptionTransport` option and the `SubscriptionTransport` interface.
+- A release workflow that publishes to npm with provenance on each GitHub release.
 - React bindings (`@emiliodominguez/graphql-client/react`): `GraphQLProvider`, `useQuery`, `useSuspenseQuery`, `useMutation`, `useSubscription` and `useClient`.
 - Live queries (`client.watch()`). They activate lazily, keep stale data visible while revalidating, and refetch on invalidation, polling, focus and reconnect.
 - Fetch policies (`cache-first`, `network-only`, `cache-only`, `no-cache`).
@@ -26,6 +29,7 @@
 
 ### Changed
 
+- `ClientError.response` is now optional, and `status` is `0` for non-HTTP transports.
 - **Breaking:** the per-call `cache?: boolean` option is replaced by `fetchPolicy`. Use `"no-cache"` for `cache: false` and `"cache-first"` for `cache: true`.
 - The last request for a cache key wins: a superseded response no longer overwrites the cache or notifies watchers.
 - Stream readers cancel on abort even when the body isn't tied to a `fetch`, for example a response returned by middleware.

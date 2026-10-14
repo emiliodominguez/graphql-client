@@ -191,36 +191,47 @@ export class Client {
 		const context: OperationContext = { ...operation, query, variables: options.variables, attempt: 0 };
 
 		try {
-			const headers = await this.createHeaders(query, options.headers);
+			const { subscriptionTransport } = this.configuration;
+			const request = { query, variables: options.variables, operationName: options.operationName };
+			let response: Response | undefined;
+			let source: AsyncIterable<IncrementalPayload> | undefined;
 
-			headers.set(
-				"Accept",
-				INCREMENTAL_DIRECTIVE.test(query) ? `text/event-stream, ${MULTIPART_ACCEPT}` : "text/event-stream",
-			);
+			if (subscriptionTransport && operation.type === "subscription") {
+				source = subscriptionTransport.subscribe(request, scope.signal);
+			} else {
+				const headers = await this.createHeaders(query, options.headers);
 
-			const payload: Payload = { query, variables: options.variables, operationName: options.operationName };
-			const response = await this.run(this.createRequest(payload, "POST", headers, scope.signal), context);
-			const contentType = response.headers.get("Content-Type") ?? "";
-			const source =
-				!response.ok || !response.body
-					? undefined
-					: contentType.includes("text/event-stream")
-						? readServerSentEventData(response.body, scope.signal)
-						: contentType.includes("multipart/mixed")
-							? readMultipartMixed(response.body, getBoundary(contentType), scope.signal)
-							: undefined;
+				headers.set(
+					"Accept",
+					INCREMENTAL_DIRECTIVE.test(query) ? `text/event-stream, ${MULTIPART_ACCEPT}` : "text/event-stream",
+				);
 
-			if (!source) {
-				yield await this.parseResponse<TData>(response, scope.signal);
-				return;
+				response = await this.run(this.createRequest(request, "POST", headers, scope.signal), context);
+
+				const contentType = response.headers.get("Content-Type") ?? "";
+				const chunks =
+					!response.ok || !response.body
+						? undefined
+						: contentType.includes("text/event-stream")
+							? readServerSentEventData(response.body, scope.signal)
+							: contentType.includes("multipart/mixed")
+								? readMultipartMixed(response.body, getBoundary(contentType), scope.signal)
+								: undefined;
+
+				if (!chunks) {
+					yield await this.parseResponse<TData>(response, scope.signal);
+					return;
+				}
+
+				source = parseChunks(chunks);
 			}
 
 			this.log(operation, "streaming");
 
 			const state = createIncrementalState();
 
-			for await (const chunk of source) {
-				const { data, errors } = applyIncremental(state, JSON.parse(chunk) as IncrementalPayload);
+			for await (const payload of source) {
+				const { data, errors } = applyIncremental(state, payload);
 
 				if (errors.length) throw createGraphQLError(response, errors, data);
 				if (data !== undefined) yield data as TData;
@@ -747,18 +758,32 @@ export class Client {
 }
 
 /**
- * Creates the ClientError for a response carrying GraphQL errors.
+ * Creates the ClientError for a result carrying GraphQL errors.
  *
- * @param response - The fetch Response
+ * @param response - The fetch Response, absent for non-HTTP transports
  * @param errors - The GraphQL errors
  * @param data - Partial data, if any
  * @returns The error
  */
-function createGraphQLError(response: Response, errors: ReadonlyArray<GraphQLFormattedError>, data: unknown): ClientError {
+function createGraphQLError(
+	response: Response | undefined,
+	errors: ReadonlyArray<GraphQLFormattedError>,
+	data: unknown,
+): ClientError {
 	const summary = errors.map(getMessage).join("; ");
-	const message = response.ok ? summary : `${describeStatus(response)}: ${summary}`;
+	const message = !response || response.ok ? summary : `${describeStatus(response)}: ${summary}`;
 
-	return new ClientError(message, { status: response.status, response, errors, data });
+	return new ClientError(message, { status: response?.status ?? 0, response, errors, data });
+}
+
+/**
+ * Parses streamed JSON chunks.
+ *
+ * @param chunks - Raw JSON strings
+ * @yields The parsed payloads
+ */
+async function* parseChunks(chunks: AsyncIterable<string>): AsyncGenerator<IncrementalPayload> {
+	for await (const chunk of chunks) yield JSON.parse(chunk) as IncrementalPayload;
 }
 
 /**
