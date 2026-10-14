@@ -53,7 +53,29 @@ interface SuspenseEntry {
 	error?: unknown | undefined;
 	/** Whether the initial load failed */
 	failed: boolean;
+	/** Stops the entry's own subscription, which keeps the query active until its component subscribes */
+	release(): void;
 }
+
+/**
+ * A query executed by {@link useLazyQuery}, bound to the client and document it was executed with.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ */
+interface LazyExecution<TData, TVariables> {
+	/** The client that executed it */
+	client: Client;
+	/** The executed document */
+	query: string;
+	/** The live query */
+	ref: QueryRef<TData, TVariables>;
+}
+
+/**
+ * How long a failed suspense entry outlives the render that threw it, covering React's error-recovery render.
+ */
+const FAILURE_RETENTION = 100;
 
 /**
  * How long a settled suspense entry waits for its component to mount before being dropped.
@@ -230,6 +252,7 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 	const client = useClient();
 	const identity = getIdentity(options);
 	const requests = getSuspenseRequests(client);
+	const latestOptions = useLatest(options);
 
 	// Suspended renders discard memoized values, so the ref that loaded while suspended is adopted from the entry.
 	// Reusing the same ref (instead of seeding a new one) keeps its freshness tracking, e.g. missed invalidations.
@@ -239,7 +262,7 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 
 			return (
 				(entry?.ref as QueryRef<TData, TVariables> | undefined) ??
-				client.watch<TData, TVariables>(options as WithVariables<WatchOptions<TData, TVariables>, TVariables>)
+				client.watch<TData, TVariables>(withLatestRequestOptions(options, latestOptions))
 			);
 		},
 		// `identity` captures every option that defines the query.
@@ -249,7 +272,13 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 
 	useEffect(
 		function releaseSuspenseEntry(): void {
-			if (requests.get(identity)?.ref === ref) requests.delete(identity);
+			const entry = requests.get(identity);
+
+			// Runs after `useSyncExternalStore` subscribed: the query stays active (no refetch) across the handover.
+			if (entry?.ref === ref) {
+				requests.delete(identity);
+				entry.release();
+			}
 		},
 		[requests, identity, ref],
 	);
@@ -258,7 +287,13 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 		const entry = requests.get(identity);
 
 		if (entry?.failed) {
-			requests.delete(identity);
+			// Kept briefly: React retries a failed render once more (in a later task), which must rethrow the same error
+			// instead of sending another request. A boundary reset after that starts a fresh request.
+			setTimeout(function forgetFailure(): void {
+				if (requests.get(identity) === entry) requests.delete(identity);
+
+				entry.release();
+			}, FAILURE_RETENTION);
 			throw entry.error;
 		}
 
@@ -376,19 +411,22 @@ export function useLazyQuery<TData = unknown, TVariables extends object = Record
 ): [LazyQueryExecute<TData, TVariables>, UseLazyQueryResult<TData, TVariables>] {
 	const client = useClient();
 	const latestOptions = useLatest(options);
-	const [ref, setRef] = useState<QueryRef<TData, TVariables> | undefined>(undefined);
+	const [executed, setExecuted] = useState<LazyExecution<TData, TVariables> | undefined>(undefined);
+	// A query executed with another client or document (e.g. after a logout) no longer belongs to this hook.
+	const ref = executed?.client === client && executed.query === String(query) ? executed.ref : undefined;
 	const result = useQueryRefResult(ref, options?.keepPreviousData === true);
 
 	const execute = useCallback(
 		function execute(variables?: TVariables): Promise<TData> {
 			// The live query performs the request itself: exactly one request (and one onError) per execution.
-			const next = client.watch<TData, TVariables>({
-				...latestOptions.current,
-				query,
-				variables,
-			} as WithVariables<WatchOptions<TData, TVariables>, TVariables>);
+			const next = client.watch<TData, TVariables>(
+				withLatestRequestOptions(
+					{ ...latestOptions.current, query, variables } as UseQueryOptions<TData, TVariables>,
+					latestOptions,
+				),
+			);
 
-			setRef(next);
+			setExecuted({ client, query: String(query), ref: next });
 
 			return firstSettled(next);
 		},
@@ -425,7 +463,15 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 
 	useEffect(
 		function connect(): (() => void) | undefined {
-			if (options.skip) return undefined;
+			if (options.skip) {
+				setState(function idle(previous: UseSubscriptionResult<TData>): UseSubscriptionResult<TData> {
+					return previous.active || previous.data !== undefined || previous.error !== undefined
+						? { data: undefined, error: undefined, active: false }
+						: previous;
+				});
+
+				return undefined;
+			}
 
 			const controller = new AbortController();
 			const { query, variables, operationName, headers } = latestOptions.current;
@@ -434,9 +480,8 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 			 * Consumes the stream into state until it ends, fails or is aborted.
 			 */
 			async function consume(): Promise<void> {
-				setState(function open(previous: UseSubscriptionResult<TData>): UseSubscriptionResult<TData> {
-					return { data: previous.data, error: undefined, active: true };
-				});
+				// Payloads of other variables or documents never show as this stream's.
+				setState({ data: undefined, error: undefined, active: true });
 
 				try {
 					const stream = client.subscribe<TData, TVariables>({
@@ -448,6 +493,9 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 					} as WithVariables<SubscribeOptions<TData, TVariables>, TVariables>);
 
 					for await (const data of stream) {
+						// A payload already in flight when the stream was torn down belongs to the old variables.
+						if (controller.signal.aborted) break;
+
 						setState({ data, error: undefined, active: true });
 						latestOptions.current.onData?.(data);
 					}
@@ -578,14 +626,43 @@ function useQueryRef<TData, TVariables extends object>(
 ): QueryRef<TData, TVariables> {
 	const client = useClient();
 	const identity = getIdentity(options);
+	const latestOptions = useLatest(options);
 
 	return useMemo(
 		function createQueryRef(): QueryRef<TData, TVariables> {
-			return client.watch<TData, TVariables>(options as WithVariables<WatchOptions<TData, TVariables>, TVariables>);
+			return client.watch<TData, TVariables>(withLatestRequestOptions(options, latestOptions));
 		},
 		// `identity` captures every option that defines the query.
 		[client, identity],
 	);
+}
+
+/**
+ * Wraps query options so request-level settings (`headers`, `timeout`, `retry`) are read from the latest render
+ * whenever the live query fetches (refetch, polling, invalidation), e.g. after an auth token rotated.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ * @param options - The options the query is created with
+ * @param latest - Ref to the latest options
+ * @returns Watch options with live request settings
+ */
+function withLatestRequestOptions<TData, TVariables>(
+	options: Partial<UseQueryOptions<TData, TVariables>>,
+	latest: { readonly current: Partial<UseQueryOptions<TData, TVariables>> | undefined },
+): WithVariables<WatchOptions<TData, TVariables>, TVariables> {
+	const wrapped = { ...options };
+
+	for (const name of ["headers", "timeout", "retry"] as const) {
+		Object.defineProperty(wrapped, name, {
+			enumerable: true,
+			get(): unknown {
+				return latest.current?.[name];
+			},
+		});
+	}
+
+	return wrapped as WithVariables<WatchOptions<TData, TVariables>, TVariables>;
 }
 
 /**
@@ -654,14 +731,14 @@ function startSuspenseRequest(
 	identity: string,
 	ref: QueryRef<unknown, unknown>,
 ): SuspenseEntry {
-	const entry: SuspenseEntry = { ref, failed: false, promise: Promise.resolve() };
+	const entry: SuspenseEntry = { ref, failed: false, promise: Promise.resolve(), release: noop };
 
 	entry.promise = new Promise<void>(function load(resolve): void {
 		let settled = false;
-		let unsubscribe: (() => void) | undefined;
 
 		/**
-		 * Settles once the query has data or failed, then stops observing it.
+		 * Settles once the query has data or failed. The subscription stays until the component takes over (or the
+		 * entry expires): React may commit long after the data arrived, and an idle query would refetch on resume.
 		 *
 		 * @param state - The query state
 		 */
@@ -671,16 +748,15 @@ function startSuspenseRequest(
 			settled = true;
 			entry.failed = state.data === undefined;
 			entry.error = state.error;
-			unsubscribe?.();
 			resolve();
 			setTimeout(function expire(): void {
 				if (requests.get(identity) === entry) requests.delete(identity);
+
+				entry.release();
 			}, SUSPENSE_RETENTION);
 		}
 
-		unsubscribe = ref.subscribe(observe);
-
-		if (settled) unsubscribe();
+		entry.release = ref.subscribe(observe);
 	});
 
 	requests.set(identity, entry);

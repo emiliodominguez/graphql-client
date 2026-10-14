@@ -415,6 +415,9 @@ export class Client {
 			let last: unknown;
 
 			for await (const payload of source) {
+				// Payloads already buffered when the consumer aborted are dropped.
+				if (scope.signal.aborted) break;
+
 				const { data, errors } = applyIncremental(state, payload);
 
 				if (errors.length) throw createGraphQLError(response, errors, data);
