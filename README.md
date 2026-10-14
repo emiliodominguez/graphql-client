@@ -281,6 +281,8 @@ export function useQuery(options) {
 	return state;
 }
 
+// Vue: keep the client out of reactive proxies (it uses native private fields): `markRaw(client)`
+
 // Solid
 const todos = from(client.watch({ key: ["todos"], query: TODOS }));
 ```
@@ -578,8 +580,8 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                  | Size    |
 | --------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken)  | ~7.1 kB |
-| `@emiliodominguez/graphql-client/react` | ~1.4 kB |
+| `Client` + `MemoryCache` (tree-shaken)  | ~7.6 kB |
+| `@emiliodominguez/graphql-client/react` | ~1.5 kB |
 | `@emiliodominguez/graphql-client/ws`    | ~1.5 kB |
 
 ## Development

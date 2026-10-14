@@ -369,3 +369,210 @@ describe("optimistic layers (concurrency)", function () {
 		expect(onError).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("optimistic layers (review 4)", function () {
+	/**
+	 * Mutation server: mutations wait for `release`; titles starting with "boom" fail.
+	 *
+	 * @returns The fetch mock, release functions and server state
+	 */
+	function gated() {
+		const todos = ["a"];
+		const releases: Array<() => void> = [];
+		const fetchMock = vi.fn<typeof fetch>(async function (input) {
+			const { query, variables } = await (input as Request).clone().json();
+
+			if (!query.startsWith("mutation")) return Response.json({ data: { todos: [...todos] } });
+
+			await new Promise<void>(function (resolve) {
+				releases.push(resolve);
+			});
+
+			if (variables.title.startsWith("boom")) return Response.json({ errors: [{ message: "rejected" }] });
+
+			todos.push(variables.title);
+
+			return Response.json({ data: { add: true } });
+		});
+
+		return { fetchMock, releases, todos };
+	}
+
+	it("a successful mutation's own invalidates is not undone by its optimistic layer", async function () {
+		const { fetchMock, releases } = gated();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const mutation = client.gql({
+			query: ADD,
+			variables: { title: "b" },
+			optimistic: [append("temp")],
+			invalidates: [["todos"]],
+		});
+
+		await tick();
+		releases[0]!();
+		await mutation;
+
+		expect(await client.read(TARGET)).toBeUndefined();
+	});
+
+	it("an invalidation during a pending layer is not undone by the rollback", async function () {
+		const { fetchMock, releases } = gated();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const mutation = client
+			.gql({ query: ADD, variables: { title: "boom" }, optimistic: [append("boom")] })
+			.catch(function () {});
+
+		await tick();
+		await client.invalidate(["todos"]);
+		releases[0]!();
+		await mutation;
+
+		expect(await client.read(TARGET)).toBeUndefined();
+	});
+
+	it("a throwing update leaves no orphan layer behind", async function () {
+		const { fetchMock, releases } = gated();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["old"] });
+		await expect(
+			client.gql({
+				query: ADD,
+				variables: { title: "x" },
+				optimistic: [
+					optimistic(TARGET, function () {
+						throw new TypeError("bad update");
+					}),
+				],
+			}),
+		).rejects.toThrow("bad update");
+
+		await client.invalidate(["todos"]);
+
+		const mutation = client.gql({ query: ADD, variables: { title: "new" }, optimistic: [append("new")] });
+
+		await tick();
+		expect(await client.read(TARGET)).toEqual({ todos: ["new"] });
+
+		releases[0]!();
+		await mutation;
+	});
+
+	it("fetchMore keeps pending layers as layers", async function () {
+		const { releases } = gated();
+		const pages = vi.fn<typeof fetch>(async function (input) {
+			const { query, variables } = await (input as Request).clone().json();
+
+			if (query.startsWith("mutation")) {
+				await new Promise<void>(function (resolve) {
+					releases.push(resolve);
+				});
+
+				return Response.json({ errors: [{ message: "rejected" }] });
+			}
+
+			return Response.json({ data: { todos: variables?.page ? ["b"] : ["a"] } });
+		});
+		const client = new Client({ url: URL, fetch: pages, cache: new MemoryCache() });
+		const ref = client.watch<{ todos: string[] }, { page?: number }>({ ...TARGET, variables: {} });
+		const stop = ref.subscribe(function () {});
+
+		await tick();
+
+		const target = { ...TARGET, variables: {} };
+		const failing = client
+			.gql({
+				query: ADD,
+				variables: { title: "boom" },
+				optimistic: [
+					optimistic(target, function (current: { todos: string[] } | undefined) {
+						return { todos: [...(current?.todos ?? []), "temp"] };
+					}),
+				],
+			})
+			.catch(function () {});
+
+		await tick();
+		await ref.fetchMore({
+			variables: { page: 2 },
+			merge(previous, next) {
+				return { todos: [...previous.todos, ...next.todos] };
+			},
+		});
+
+		expect(ref.getState().data).toEqual({ todos: ["a", "b", "temp"] });
+		expect(await client.read(target)).toEqual({ todos: ["a", "b", "temp"] });
+
+		releases[0]!();
+		await failing;
+
+		expect(await client.read(target)).toEqual({ todos: ["a", "b"] });
+		stop();
+	});
+
+	it("never applies layers twice over cached visible data", async function () {
+		const { fetchMock, releases } = gated();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const mutation = client
+			.gql({ query: ADD, variables: { title: "boom" }, optimistic: [append("t")] })
+			.catch(function () {});
+
+		await tick();
+
+		const ref = client.watch({ ...TARGET, fetchPolicy: "cache-only" });
+		const stop = ref.subscribe(function () {});
+
+		await ref.refetch();
+		expect(ref.getState().data).toEqual({ todos: ["a", "t"] });
+
+		releases[0]!();
+		await mutation;
+		stop();
+	});
+
+	it("extract() never ships optimistic data", async function () {
+		const { fetchMock, releases } = gated();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const mutation = client
+			.gql({ query: ADD, variables: { title: "boom" }, optimistic: [append("boom")] })
+			.catch(function () {});
+
+		await tick();
+		expect(Object.values(await client.extract())).toEqual([{ todos: ["a"] }]);
+
+		releases[0]!();
+		await mutation;
+	});
+
+	it("does not resurrect data that expired while a layer was pending", async function () {
+		vi.useFakeTimers();
+
+		const { fetchMock, releases } = gated();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache({ ttl: 1_000 }) });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const mutation = client
+			.gql({ query: ADD, variables: { title: "boom" }, optimistic: [append("boom")] })
+			.catch(function () {});
+
+		await vi.advanceTimersByTimeAsync(2_000);
+		releases[0]!();
+		await mutation;
+
+		expect(await client.read(TARGET)).toBeUndefined();
+		vi.useRealTimers();
+	});
+});

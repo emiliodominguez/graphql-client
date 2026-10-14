@@ -637,3 +637,19 @@ describe("listener hand-off", function () {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 });
+
+describe("activation", function () {
+	it("is not stuck loading when the cache filled before the first subscribe", async function () {
+		const fetchMock = counter();
+		const client = createClient(fetchMock);
+		const ref = client.watch({ query: TODOS });
+
+		await client.gql({ query: TODOS });
+
+		const unsubscribe = ref.subscribe(function () {});
+
+		expect(ref.getState()).toEqual({ data: { n: 1 }, error: undefined, loading: false });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		unsubscribe();
+	});
+});

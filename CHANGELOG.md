@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- Optimistic layers on invalidated or expired entries no longer write their old base back. This covers a mutation's own `invalidates` on success, an invalidation while a layer is pending, and TTL expiry.
+- A throwing optimistic update no longer leaves an orphan layer entry behind.
+- `fetchMore` merges pages onto the real data, so pending optimistic layers stay layers.
+- Live queries never apply optimistic layers twice when reading data that is already layered from the cache.
+- `extract()` snapshots real data only, never pending optimistic data.
+- Live queries no longer stay `loading` forever when the cache filled before their first subscriber.
+- A cache failure while settling a successful optimistic mutation is reported through `onError` instead of rejecting the mutation.
+- `RequiredKeys` keeps known required keys in variables that also have an index signature.
 - Optimistic updates are layered. Each update sits on top of the entry's real data. Responses, writes and refetches rebase the pending layers, a failure removes only its own layer, and a success folds it into the real data. Concurrent optimistic mutations, refetches and invalidations no longer clobber each other.
 - An optimistic `update` that throws rolls back the layers already applied and is reported to `onError`.
 - `useLazyQuery` drives its own live query: one request and one `onError` per execution, whatever the dedupe settings or the fetch policy.

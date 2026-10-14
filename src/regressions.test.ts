@@ -427,7 +427,7 @@ describe("review 2", function () {
 		});
 
 		await expect(client.gql({ query: DEFERRED })).rejects.toMatchObject({
-			message: expect.stringContaining("Incomplete incremental response"),
+			message: "Incomplete incremental response.",
 			data: { a: 1 },
 		});
 		expect(cache.size).toBe(0);

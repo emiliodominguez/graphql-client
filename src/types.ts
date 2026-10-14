@@ -381,7 +381,11 @@ export interface FetchMoreOptions<TData, TVariables> {
  *
  * @template T - An object type
  */
-export type RequiredKeys<T> = T extends unknown ? { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T] : never;
+export type RequiredKeys<T> = T extends unknown
+	? keyof {
+			[K in keyof T as string extends K ? never : number extends K ? never : {} extends Pick<T, K> ? never : K]: true;
+		}
+	: never;
 
 /**
  * Blocks inference from a position (like TypeScript 5.4's `NoInfer`, compatible with older compilers).

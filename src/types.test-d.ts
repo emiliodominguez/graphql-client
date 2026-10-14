@@ -125,3 +125,13 @@ describe("required variables (review 3)", function () {
 		expectTypeOf(Component).toBeFunction();
 	});
 });
+
+describe("required variables with index signatures", function () {
+	it("keeps known required keys", function () {
+		const indexed = "query { a }" as unknown as TypedDocumentString<User, { id: number; [key: string]: unknown }>;
+
+		// @ts-expect-error id is required
+		client.gql({ query: indexed });
+		client.gql({ query: indexed, variables: { id: 1, extra: true } });
+	});
+});

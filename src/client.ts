@@ -89,6 +89,11 @@ interface OptimisticEntry {
 	base: unknown;
 	/** Pending optimistic updates, oldest first */
 	layers: Array<OptimisticLayer>;
+	/**
+	 * Set when the entry was invalidated: the base is unknown until real data arrives, so nothing is rendered into
+	 * the cache and successes are not folded into it.
+	 */
+	stale: boolean;
 }
 
 /**
@@ -253,7 +258,13 @@ export class Client {
 				hasFiles,
 			);
 
-			await settle?.(true);
+			// The mutation succeeded: a failing cache write while settling is reported, never turned into a rejection
+			// (callers could retry a non-idempotent mutation).
+			try {
+				await settle?.(true);
+			} catch (settleError) {
+				this.#report(settleError, { ...operation, query, variables: options.variables, attempt: 0 }, options.signal);
+			}
 
 			return data;
 		} catch (error) {
@@ -480,6 +491,12 @@ export class Client {
 				write(data: TData): Promise<void> {
 					return client.write<TData, TVariables>(options, data);
 				},
+				real(visible: TData | undefined): TData | undefined {
+					return client.#real(cacheKey, visible);
+				},
+				overlay(data: TData): TData {
+					return client.#overlay(cacheKey, data);
+				},
 			},
 			options,
 		);
@@ -534,7 +551,9 @@ export class Client {
 		for (const key of [...(await cache.keys())]) {
 			if (!matchesKeyPrefix(key, [])) continue;
 
-			const data = await cache.get(key);
+			// Never ship optimistic (unconfirmed) data in a snapshot: take the real data under pending layers.
+			const entry = this.#shared.layers.get(key);
+			const data = entry ? (entry.stale ? undefined : entry.base) : await cache.get(key);
 
 			if (data !== undefined) snapshot[key] = data;
 		}
@@ -574,6 +593,13 @@ export class Client {
 
 		for (const key of [...inFlight.keys()]) {
 			if (matchesKeyPrefix(key.replace(/^no-cache:/, ""), prefix)) inFlight.delete(key);
+		}
+
+		for (const [key, entry] of shared.layers) {
+			if (matchesKeyPrefix(key, prefix)) {
+				entry.stale = true;
+				entry.base = undefined;
+			}
 		}
 
 		shared.invalidations.push({ prefix, epoch });
@@ -963,31 +989,39 @@ export class Client {
 
 				entry.layers.splice(index, 1);
 
-				if (commit) entry.base = applyLayer(layer, entry.base);
-				if (entry.layers.length === 0) layers.delete(cacheKey);
+				// An invalidated base is unknown: never fold into it, the refetch brings the truth.
+				if (commit && !entry.stale) entry.base = applyLayer(entry.base, layer);
 
-				await client.#render(cacheKey, entry);
+				if (entry.layers.length > 0) {
+					await client.#render(cacheKey, entry);
+					continue;
+				}
+
+				layers.delete(cacheKey);
+
+				// The last layer is gone: restore the real data, unless it was invalidated or expired meanwhile.
+				const cache = client.#configuration.cache;
+				const expired = cache !== undefined && (await cache.get(cacheKey)) === undefined;
+
+				if (!entry.stale && !expired) await client.#render(cacheKey, entry);
 			}
 		}
 
 		try {
 			for (const { target, update } of updates) {
 				const cacheKey = this.#getCacheKey(target);
-				let entry = layers.get(cacheKey);
-
-				if (!entry) {
-					const cached = await this.#configuration.cache?.get(cacheKey);
-
-					// Another optimistic operation may have created the entry while the cache was read.
-					// Without a cache (or on a miss), live queries showing the entry still hold its current data.
-					entry = layers.get(cacheKey) ?? { base: cached ?? this.#peekWatchers(cacheKey), layers: [] };
-					layers.set(cacheKey, entry);
-				}
-
+				const existing = layers.get(cacheKey);
+				// Without a cache (or on a miss), live queries showing the entry still hold its current data.
+				const base = existing
+					? existing.base
+					: ((await this.#configuration.cache?.get(cacheKey)) ?? this.#peekWatchers(cacheKey));
+				// Another optimistic operation may have created the entry while the cache was read.
+				const entry = layers.get(cacheKey) ?? { base, layers: [], stale: false };
 				const layer: OptimisticLayer = { update };
 
-				// Validate the update before stacking it, so a throwing update leaves nothing behind.
-				update(entry.layers.reduce(applyLayerReducer, entry.base));
+				// Validate the update before registering anything, so a throwing update leaves nothing behind.
+				update(entry.layers.reduce(applyLayer, entry.base));
+				layers.set(cacheKey, entry);
 				entry.layers.push(layer);
 				applied.push({ cacheKey, layer });
 				await this.#render(cacheKey, entry);
@@ -1012,6 +1046,7 @@ export class Client {
 
 		if (entry) {
 			entry.base = data;
+			entry.stale = false;
 			await this.#render(cacheKey, entry);
 			return;
 		}
@@ -1028,7 +1063,10 @@ export class Client {
 	 * @param entry - The optimistic entry
 	 */
 	async #render(cacheKey: string, entry: OptimisticEntry): Promise<void> {
-		const visible = entry.layers.reduce(applyLayerReducer, entry.base);
+		// An invalidated entry waits for real data: its watchers are already refetching.
+		if (entry.stale) return;
+
+		const visible = entry.layers.reduce(applyLayer, entry.base);
 
 		if (visible === undefined) {
 			await this.#configuration.cache?.delete(cacheKey);
@@ -1053,7 +1091,24 @@ export class Client {
 	#overlay<TData>(cacheKey: string, data: TData): TData {
 		const entry = this.#shared.layers.get(cacheKey);
 
-		return entry ? (entry.layers.reduce(applyLayerReducer, data) as TData) : data;
+		if (!entry) return data;
+
+		// The fetched value may be a cache hit that already includes the layers: always render from the real data.
+		return entry.layers.reduce(applyLayer, entry.stale ? data : entry.base) as TData;
+	}
+
+	/**
+	 * Returns the real data under an entry's optimistic layers, or `visible` when it has none.
+	 *
+	 * @template TData - The shape of the data
+	 * @param cacheKey - The serialized cache key
+	 * @param visible - The data currently shown
+	 * @returns The real data
+	 */
+	#real<TData>(cacheKey: string, visible: TData | undefined): TData | undefined {
+		const entry = this.#shared.layers.get(cacheKey);
+
+		return entry ? (entry.base as TData | undefined) : visible;
 	}
 
 	/**
@@ -1239,29 +1294,19 @@ function createGraphQLError(
 }
 
 /**
- * Applies an optimistic layer, keeping the data unchanged when the update throws (e.g. on data it did not expect).
+ * `reduce` callback applying an optimistic layer, keeping the data unchanged when the update throws (e.g. on data
+ * it did not expect).
  *
+ * @param current - The data below the layer
  * @param layer - The optimistic layer
- * @param current - The data below it
  * @returns The data with the layer applied
  */
-function applyLayer(layer: OptimisticLayer, current: unknown): unknown {
+function applyLayer(current: unknown, layer: OptimisticLayer): unknown {
 	try {
 		return layer.update(current);
 	} catch {
 		return current;
 	}
-}
-
-/**
- * `reduce` callback applying layers in order.
- *
- * @param current - The data so far
- * @param layer - The next layer
- * @returns The data with the layer applied
- */
-function applyLayerReducer(current: unknown, layer: OptimisticLayer): unknown {
-	return applyLayer(layer, current);
 }
 
 /**
@@ -1272,7 +1317,7 @@ function applyLayerReducer(current: unknown, layer: OptimisticLayer): unknown {
  * @returns The error
  */
 function incompleteError(response: Response | undefined, data: unknown): ClientError {
-	return new ClientError("Incomplete incremental response: the stream ended before every payload arrived.", {
+	return new ClientError("Incomplete incremental response.", {
 		status: response?.status ?? 0,
 		response,
 		data,

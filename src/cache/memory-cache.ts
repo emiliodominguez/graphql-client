@@ -46,11 +46,11 @@ export class MemoryCache implements Cache {
 		const maxSize = configuration?.maxSize ?? 100;
 
 		if (Number.isNaN(ttl) || ttl < 0) {
-			throw new RangeError(`MemoryCache: "ttl" must be a non-negative number. Received ${ttl}.`);
+			throw new RangeError(`MemoryCache: invalid ttl ${ttl}`);
 		}
 
 		if (!Number.isInteger(maxSize) || maxSize < 1) {
-			throw new RangeError(`MemoryCache: "maxSize" must be a positive integer. Received ${maxSize}.`);
+			throw new RangeError(`MemoryCache: invalid maxSize ${maxSize}`);
 		}
 
 		this.#configuration = { ttl, maxSize };

@@ -44,6 +44,10 @@ export interface QueryHost<TData, TVariables> {
 	fetchMore(variables: Partial<TVariables>): Promise<TData>;
 	/** Stores data for this query's entry and notifies every watcher of it */
 	write(data: TData): Promise<void>;
+	/** The real data under pending optimistic layers (or `visible` when there are none) */
+	real(visible: TData | undefined): TData | undefined;
+	/** Applies pending optimistic layers on top of real data */
+	overlay(data: TData): TData;
 }
 
 /**
@@ -210,12 +214,14 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 			if (version !== this.#version) return this.#state;
 
-			const merged = this.#state.data === undefined ? next : options.merge(this.#state.data, next);
+			// Merge onto the real data: pending optimistic layers must stay layers, not become part of the pages.
+			const current = this.#host.real(this.#state.data);
+			const merged = current === undefined ? next : options.merge(current, next);
 
 			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.
 			if (this.#options.fetchPolicy !== "no-cache") await this.#host.write(merged);
 
-			this.#setState({ data: merged, error: undefined, loading: false });
+			this.#setState({ data: this.#host.overlay(merged), error: undefined, loading: false });
 		} catch (error) {
 			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
 		}
@@ -281,10 +287,15 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		const trustsCache = this.#host.hasCache() && (this.#options.initialData === undefined || this.#fetched);
 		const missing = trustsCache ? cached === undefined : this.#state.data === undefined;
 
-		if (missing || this.#stale || fetchPolicy === "network-only" || fetchPolicy === "cache-and-network") {
+		const fetches = missing || this.#stale || fetchPolicy === "network-only" || fetchPolicy === "cache-and-network";
+
+		if (fetches) {
 			void this.#fetch(
 				this.#stale || fetchPolicy === "network-only" ? this.#refreshPolicy() : (fetchPolicy ?? "cache-first"),
 			);
+		} else if (this.#state.loading && this.#state.data !== undefined) {
+			// Data arrived (e.g. in the cache) between construction and activation: nothing left to load.
+			this.#setState({ data: this.#state.data, error: this.#state.error, loading: false });
 		}
 
 		if (pollInterval) {
