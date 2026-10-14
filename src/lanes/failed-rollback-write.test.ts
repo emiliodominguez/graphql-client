@@ -12,11 +12,12 @@ const TARGET = { key: ["todos"], query: TODOS };
  *
  * @returns The cache and its fault switches
  */
-function faultyCache(): { cache: Cache; faults: { set: boolean; delete: boolean; keys: boolean } } {
+function faultyCache(): { cache: Cache; faults: { get: boolean; set: boolean; delete: boolean; keys: boolean } } {
 	const memory = new MemoryCache();
-	const faults = { set: false, delete: false, keys: false };
+	const faults = { get: false, set: false, delete: false, keys: false };
 	const cache: Cache = {
 		get: function <T>(key: string) {
+			if (faults.get) throw new Error("get failed");
 			return memory.get<T>(key);
 		},
 		set: function <T>(key: string, value: T) {
@@ -139,5 +140,31 @@ describe("a rollback whose cache write fails", function () {
 
 		// Read later (e.g. by a fetchMore merge), the rolled-back item would become real data.
 		expect(await client.read<Todos>(TARGET)).toBeUndefined();
+	});
+
+	it("restores the real data in the cache when the rollback cannot read the cache", async function () {
+		const { fetchMock, held } = heldServer();
+		const { cache, faults } = faultyCache();
+		const client = new Client({
+			url: URL,
+			fetch: fetchMock,
+			cache,
+			onError: function ignore() {},
+		});
+
+		await client.write<Todos>(TARGET, { todos: ["a"] });
+
+		const mutation = client.gql({ query: ADD, variables: { title: "x" }, optimistic: [addNew()] });
+		await tick();
+
+		// Reads fail while the mutation fails and rolls back.
+		faults.get = true;
+		take(held, "Add").respond({ errors: [{ message: "nope" }] });
+		await expect(mutation).rejects.toThrow("nope");
+		await tick();
+		faults.get = false;
+
+		// The optimistic item would otherwise become the real data of the next optimistic operation.
+		expect(await client.read<Todos>(TARGET)).toEqual({ todos: ["a"] });
 	});
 });

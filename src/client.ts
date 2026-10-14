@@ -1695,11 +1695,12 @@ export class Client {
 
 			// Remaining layers are rendered. Once the last layer is gone, the real data is restored; if the entry expired
 			// meanwhile, only live queries get it back (they would otherwise keep showing the removed layer): nothing is
-			// written to the cache.
+			// written to the cache. A failed read proves nothing: the render then overwrites the optimistic data the cache
+			// may still hold (it would otherwise become the real data of the next optimistic operation).
 			const expired =
 				entry.layers.length === 0 &&
 				this.#configuration.cache !== undefined &&
-				(await this.#read(cacheKey)) === undefined;
+				(await this.#read(cacheKey).then(isMissing, returnFalse));
 
 			if (expired) this.#retract(cacheKey, entry.base, entry.base === undefined);
 			else await this.#render(cacheKey, entry);
@@ -2215,4 +2216,23 @@ function committedData(entry: OptimisticEntry): unknown {
  */
 function isCommitted(layer: OptimisticLayer): boolean {
 	return layer.committed === true;
+}
+
+/**
+ * Whether a cache read missed.
+ *
+ * @param value - The value read
+ * @returns `true` for `undefined`
+ */
+function isMissing(value: unknown): boolean {
+	return value === undefined;
+}
+
+/**
+ * Settles a failed check as `false`.
+ *
+ * @returns `false`
+ */
+function returnFalse(): false {
+	return false;
 }
