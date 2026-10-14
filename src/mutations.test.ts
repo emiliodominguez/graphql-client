@@ -357,7 +357,7 @@ describe("optimistic layers (concurrency)", function () {
 				variables: { title: "b" },
 				optimistic: [
 					append("b"),
-					optimistic(OTHER, function (current: { other: string[] } | undefined) {
+					optimistic(OTHER, function (current: { readonly other: readonly string[] } | undefined) {
 						return { other: [...current!.other] };
 					}),
 				],
@@ -491,7 +491,7 @@ describe("optimistic layers (review 4)", function () {
 				query: ADD,
 				variables: { title: "boom" },
 				optimistic: [
-					optimistic(target, function (current: { todos: string[] } | undefined) {
+					optimistic(target, function (current: { readonly todos: readonly string[] } | undefined) {
 						return { todos: [...(current?.todos ?? []), "temp"] };
 					}),
 				],

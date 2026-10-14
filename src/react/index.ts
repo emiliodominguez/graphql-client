@@ -717,7 +717,7 @@ function useLatest<T>(value: T): { readonly current: T } {
  * @param options - Query options
  * @returns The identity string
  */
-function getIdentity(options: Partial<UseQueryOptions<unknown, unknown>>): string {
+function getIdentity<TData, TVariables>(options: Partial<UseQueryOptions<TData, TVariables>>): string {
 	return stableStringify([
 		options.key ?? [],
 		String(options.query),

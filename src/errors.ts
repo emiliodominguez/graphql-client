@@ -54,5 +54,9 @@ export class ClientError extends Error {
  * @returns `true` when the value is a ClientError
  */
 export function isClientError(error: unknown): error is ClientError {
-	return error instanceof ClientError || (error instanceof Error && error.name === "ClientError");
+	// Duck-typed across copies of the library (e.g. ESM and CJS builds), but never another library's `ClientError`.
+	return (
+		error instanceof ClientError ||
+		(error instanceof Error && error.name === "ClientError" && Array.isArray((error as ClientError).errors))
+	);
 }

@@ -419,7 +419,7 @@ describe("rolled-back layers never survive a failed refetch", function () {
 	 * @returns The optimistic update
 	 */
 	function append(title: string) {
-		return optimistic(TARGET, function (current: { todos: string[] } | undefined) {
+		return optimistic(TARGET, function (current: { readonly todos: readonly string[] } | undefined) {
 			return { todos: [...(current?.todos ?? []), title] };
 		});
 	}

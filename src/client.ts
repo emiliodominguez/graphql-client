@@ -28,6 +28,8 @@ import type {
 	SubscribeOptions,
 	SubscriptionRequest,
 	WatchOptions,
+	HeadersLike,
+	NoInference,
 	WithVariables,
 } from "./types";
 import { containsFiles, createUploadBody } from "./upload";
@@ -531,7 +533,7 @@ export class Client {
 				register(watcher: QueryWatcher<TData>): () => void {
 					return client.#register(cacheKey, watcher as QueryWatcher<unknown>);
 				},
-				fetchMore(variables: Partial<TVariables>): Promise<TData> {
+				fetchMore(variables: Partial<TVariables> | undefined): Promise<TData> {
 					return client.gql<TData, TVariables>({
 						...options,
 						variables: { ...options.variables, ...variables } as TVariables,
@@ -568,7 +570,7 @@ export class Client {
 	 * @returns The cached data, or `undefined`
 	 */
 	async read<TData = unknown, TVariables extends object = Record<string, unknown>>(
-		target: CacheTarget<TData, TVariables>,
+		target: WithVariables<CacheTarget<TData, TVariables>, TVariables>,
 	): Promise<TData | undefined> {
 		return this.#configuration.cache?.get<TData>(this.#getCacheKey(target));
 	}
@@ -583,8 +585,8 @@ export class Client {
 	 * @param data - The data to store
 	 */
 	async write<TData = unknown, TVariables extends object = Record<string, unknown>>(
-		target: CacheTarget<TData, TVariables>,
-		data: TData,
+		target: WithVariables<CacheTarget<TData, TVariables>, TVariables>,
+		data: NoInference<TData>,
 	): Promise<void> {
 		const cacheKey = this.#getCacheKey(target);
 
@@ -990,7 +992,7 @@ export class Client {
 	 * @param requestHeaders - Headers for this call only
 	 * @returns The merged headers
 	 */
-	async #createHeaders(query: string, requestHeaders?: HeadersInit): Promise<Headers> {
+	async #createHeaders(query: string, requestHeaders?: HeadersLike): Promise<Headers> {
 		const { authToken, headers } = this.#configuration;
 		const accept = INCREMENTAL_DIRECTIVE.test(query) ? `${MULTIPART_ACCEPT}, ${ACCEPT}` : ACCEPT;
 		const merged = new Headers({ "Content-Type": "application/json", Accept: accept });

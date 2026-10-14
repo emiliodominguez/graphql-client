@@ -45,7 +45,7 @@ const WORD = /[\w$-]/;
  */
 export function graphql<TData = unknown, TVariables = Record<string, unknown>>(
 	strings: TemplateStringsArray,
-	...fragments: ReadonlyArray<string | TypedDocumentString<unknown, unknown>>
+	...fragments: ReadonlyArray<string | TypedDocumentString<unknown, never>>
 ): DocumentString<TData, TVariables> {
 	let source = strings[0] ?? "";
 
@@ -108,7 +108,7 @@ export function dedupeFragments(document: string): string {
  * @param document - The GraphQL document
  * @returns The minified document
  */
-export function minify<T extends string | TypedDocumentString<unknown, unknown>>(document: T): T {
+export function minify<T extends string | TypedDocumentString<unknown, never>>(document: T): T {
 	let output = "";
 	let pendingSpace = false;
 

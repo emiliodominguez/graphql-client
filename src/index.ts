@@ -16,6 +16,8 @@ export type {
 	FetchPolicy,
 	GraphQLFormattedError,
 	GraphQLResponse,
+	DeepReadonly,
+	HeadersLike,
 	HeadersResolver,
 	MaybePromise,
 	Middleware,

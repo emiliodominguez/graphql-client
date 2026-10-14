@@ -582,7 +582,8 @@ describe("shared results are immutable", function () {
 				optimistic<{ todos: Array<{ id: number; title: string }> }, Record<string, unknown>>(
 					target,
 					function push(current) {
-						current!.todos.push({ id: 3, title: "c" });
+						// Bypasses the readonly types on purpose: the runtime freeze is what is under test.
+						(current!.todos as Array<{ id: number; title: string }>).push({ id: 3, title: "c" });
 						return current!;
 					},
 				),

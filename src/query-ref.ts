@@ -1,4 +1,4 @@
-import type { FetchMoreOptions, FetchPolicy, QueryState, WatchOptions } from "./types";
+import type { DeepReadonly, FetchMoreOptions, FetchPolicy, QueryState, WatchOptions } from "./types";
 
 /**
  * Listener notified on every state change.
@@ -47,7 +47,7 @@ export interface QueryHost<TData, TVariables> {
 	/** Starts receiving cache events; returns the unregister function */
 	register(watcher: QueryWatcher<TData>): () => void;
 	/** Fetches the same document with extra variables, bypassing the cache */
-	fetchMore(variables: Partial<TVariables>): Promise<TData>;
+	fetchMore(variables: Partial<TVariables> | undefined): Promise<TData>;
 	/** Stores data for this query's entry and notifies every watcher of it */
 	write(data: TData): Promise<void>;
 	/** The real data under pending optimistic layers (or `visible` when there are none) */
@@ -247,7 +247,11 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			}
 
 			const current = this.#host.real(entry);
-			const merged = current === undefined ? next : options.merge(current, next);
+			// Results are frozen: the readonly views handed to `merge` are the same objects.
+			const merged =
+				current === undefined
+					? next
+					: (options.merge(current as DeepReadonly<TData>, next as DeepReadonly<TData>) as TData);
 
 			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.
 			if (this.#options.fetchPolicy !== "no-cache") await this.#host.write(merged);

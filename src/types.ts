@@ -25,9 +25,10 @@ export type CacheKey = ReadonlyArray<string | number | boolean | null>;
 export interface TypedDocumentString<TData, TVariables> extends String {
 	/**
 	 * Phantom member used exclusively for type inference. Never read at runtime.
-	 * Declared as a method so it is bivariant: generic code can accept any typed document.
+	 * Declared as a property (not a method) so it is checked strictly: a document requiring variables cannot be
+	 * passed where its variables would be dropped (e.g. `gql<User>({ query: GET_USER })`).
 	 */
-	__apiType?(variables: TVariables): TData;
+	__apiType?: ((variables: TVariables) => TData) | undefined;
 }
 
 /**
@@ -99,7 +100,27 @@ export interface Cache {
 /**
  * Static headers or a (possibly async) factory evaluated on every request.
  */
-export type HeadersResolver = HeadersInit | (() => MaybePromise<HeadersInit | undefined>);
+export type HeadersResolver = HeadersLike | (() => MaybePromise<HeadersLike | undefined>);
+
+/**
+ * Deeply readonly view of a result. Results are frozen at runtime, so callbacks receiving cached data (`merge`,
+ * optimistic `update`) see them as readonly and must return new objects instead of mutating.
+ *
+ * @template T - The data type
+ */
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+	? T
+	: T extends ReadonlyArray<infer Item>
+		? ReadonlyArray<DeepReadonly<Item>>
+		: T extends object
+			? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+			: T;
+
+/**
+ * Anything `new Headers()` accepts. Spelled via `Headers` so consumers compiling without the DOM lib (Node-only
+ * projects) still resolve it.
+ */
+export type HeadersLike = ConstructorParameters<typeof Headers>[0];
 
 /**
  * Static token or a (possibly async) factory evaluated on every request.
@@ -265,7 +286,7 @@ export interface RequestOptions<TData, TVariables> {
 	 */
 	fetchPolicy?: FetchPolicy | undefined;
 	/** Extra headers merged on top of the client headers */
-	headers?: HeadersInit | undefined;
+	headers?: HeadersLike | undefined;
 	/** Abort signal for this call */
 	signal?: AbortSignal | undefined;
 	/** Timeout in milliseconds for this call, covering every retry. Overrides the client default; `0` disables it. */
@@ -291,12 +312,12 @@ export interface OptimisticUpdate<TData, TVariables> {
 	/** The cache entry to update */
 	target: CacheTarget<TData, TVariables>;
 	/**
-	 * Computes the optimistic data.
+	 * Computes the optimistic data. The cached data is frozen: return a new object.
 	 *
 	 * @param current - The cached data, or `undefined` when the entry is not cached
 	 * @returns The data to show until the server answers
 	 */
-	update(current: TData | undefined): TData;
+	update(current: DeepReadonly<TData> | undefined): TData | DeepReadonly<TData>;
 }
 
 /**
@@ -365,15 +386,15 @@ export type CacheTarget<TData, TVariables> = Pick<
  */
 export interface FetchMoreOptions<TData, TVariables> {
 	/** Variables merged over the query's own (e.g. the next cursor or offset) */
-	variables: Partial<TVariables>;
+	variables?: Partial<TVariables> | undefined;
 	/**
-	 * Combines the current data with the newly fetched page.
+	 * Combines the current data with the newly fetched page. Both are frozen: return a new object.
 	 *
 	 * @param previous - The current data
 	 * @param next - The fetched page
 	 * @returns The merged data
 	 */
-	merge(previous: TData, next: TData): TData;
+	merge(previous: DeepReadonly<TData>, next: DeepReadonly<TData>): TData | DeepReadonly<TData>;
 }
 
 /**
@@ -416,4 +437,5 @@ export type WithVariables<TOptions, TVariables> = [RequiredKeys<TVariables>] ext
  */
 export type WithSkippableVariables<TOptions, TVariables> = [RequiredKeys<TVariables>] extends [never]
 	? TOptions
-	: TOptions & { variables: NoInference<TVariables> | undefined };
+	: | (TOptions & { variables: NoInference<TVariables> })
+		| (TOptions & { variables: NoInference<TVariables> | undefined; skip: boolean });

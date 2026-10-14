@@ -62,7 +62,36 @@ export interface WebSocketTransportOptions {
 /**
  * Minimal WebSocket constructor contract (browser, Node 22+, `ws`, React Native...).
  */
-export type WebSocketConstructor = new (url: string, protocols?: string | string[]) => WebSocket;
+export type WebSocketConstructor = new (url: string, protocols?: string | string[]) => WebSocketLike;
+
+/**
+ * The socket members the transport uses. Event handlers take `never` so any implementation's event types fit
+ * (the DOM `WebSocket`, the `ws` package, React Native...).
+ */
+export interface WebSocketLike {
+	/** `1` once open */
+	readonly readyState: number;
+	/** Sends a text frame */
+	send(data: string): void;
+	/** Closes the connection */
+	close(code?: number, reason?: string): void;
+	/** Called once connected */
+	onopen: ((event: never) => unknown) | null;
+	/** Called for every frame */
+	onmessage: ((event: never) => unknown) | null;
+	/** Called once closed */
+	onclose: ((event: never) => unknown) | null;
+}
+
+/**
+ * The parts of a close event the transport reads.
+ */
+interface CloseInfo {
+	/** Close code */
+	readonly code: number;
+	/** Close reason */
+	readonly reason: string;
+}
 
 /**
  * A WebSocket transport, usable as `subscriptionTransport`.
@@ -124,7 +153,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	} = options;
 	const sinks = new Map<string, Sink>();
 	const timers = new Set<ReturnType<typeof setTimeout>>();
-	let socket: WebSocket | undefined;
+	let socket: WebSocketLike | undefined;
 	let acknowledged = false;
 	let acknowledgedAt = 0;
 	let awaitingPong = false;
@@ -139,7 +168,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 * @param target - The socket
 	 * @param message - The message
 	 */
-	function send(target: WebSocket, message: Message): void {
+	function send(target: WebSocketLike, message: Message): void {
 		if (target.readyState === 1) target.send(JSON.stringify(message));
 	}
 
@@ -177,7 +206,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 		if (socket || disposed || sinks.size === 0) return;
 
 		const Implementation = options.WebSocket ?? globalThis.WebSocket;
-		let current: WebSocket;
+		let current: WebSocketLike;
 
 		try {
 			current = new Implementation(url, PROTOCOL);
@@ -208,7 +237,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 			}
 		};
 
-		current.onmessage = function handleMessage(event: MessageEvent): void {
+		current.onmessage = function handleMessage(event: { readonly data: unknown }): void {
 			let message: Message | undefined;
 
 			// Late frames from a replaced or closed socket must not touch the current state.
@@ -228,7 +257,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 			receive(current, message);
 		};
 
-		current.onclose = function handleClose(event: CloseEvent): void {
+		current.onclose = function handleClose(event: CloseInfo): void {
 			closed(current, event);
 		};
 	}
@@ -239,7 +268,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 * @param target - The socket it came from
 	 * @param message - The message
 	 */
-	function receive(target: WebSocket, message: Message): void {
+	function receive(target: WebSocketLike, message: Message): void {
 		const sink = message.id === undefined ? undefined : sinks.get(message.id);
 
 		switch (message.type) {
@@ -287,7 +316,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 * @param target - The socket
 	 * @param check - Whether to verify the previous pong
 	 */
-	function ping(target: WebSocket, check: boolean): void {
+	function ping(target: WebSocketLike, check: boolean): void {
 		if (check && awaitingPong) {
 			target.close(TERMINATED, "Keep-alive timeout");
 			return;
@@ -306,7 +335,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 * @param target - The closed socket
 	 * @param event - The close event
 	 */
-	function closed(target: WebSocket, event: CloseEvent): void {
+	function closed(target: WebSocketLike, event: CloseInfo): void {
 		if (socket !== target) return;
 
 		// Only a connection that proved stable resets the retry budget.

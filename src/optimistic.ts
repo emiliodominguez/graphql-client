@@ -1,4 +1,4 @@
-import type { CacheTarget, OptimisticUpdate } from "./types";
+import type { CacheTarget, DeepReadonly, NoInference, OptimisticUpdate, WithVariables } from "./types";
 
 /**
  * Builds a typed optimistic update: `TData` and `TVariables` are inferred from the target's document.
@@ -16,12 +16,12 @@ import type { CacheTarget, OptimisticUpdate } from "./types";
  * @template TData - The shape of the entry's data
  * @template TVariables - The shape of the entry's variables
  * @param target - The cache entry to update
- * @param update - Computes the optimistic data from the cached one
+ * @param update - Computes the optimistic data from the cached (frozen) one
  * @returns The optimistic update
  */
 export function optimistic<TData, TVariables>(
-	target: CacheTarget<TData, TVariables>,
-	update: (current: TData | undefined) => TData,
+	target: WithVariables<CacheTarget<TData, TVariables>, TVariables>,
+	update: (current: DeepReadonly<TData> | undefined) => NoInference<TData> | DeepReadonly<NoInference<TData>>,
 ): OptimisticUpdate<unknown, unknown> {
 	return { target, update } as OptimisticUpdate<unknown, unknown>;
 }
