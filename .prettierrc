@@ -2,5 +2,21 @@
 	"useTabs": true,
 	"tabWidth": 4,
 	"printWidth": 125,
-	"overrides": [{ "files": ["*.yml", "*.yaml"], "options": { "useTabs": false, "tabWidth": 2 } }]
+	"overrides": [
+		{
+			"files": ["*.yml", "*.yaml"],
+			"options": {
+				"useTabs": false,
+				"tabWidth": 2
+			}
+		},
+		{
+			"files": ["*.md"],
+			"options": {
+				"useTabs": false,
+				"tabWidth": 2,
+				"printWidth": 100
+			}
+		}
+	]
 }
