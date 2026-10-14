@@ -222,6 +222,32 @@ export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Pr
 }
 
 /**
+ * Settles like `promise`, or rejects with the abort reason as soon as `signal` aborts.
+ *
+ * @template T - The resolved type
+ * @param promise - The work
+ * @param signal - The abort signal
+ * @returns The raced promise
+ */
+export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise<T>(function race(resolve, reject): void {
+		/**
+		 * Rejects with the abort reason.
+		 */
+		function abort(): void {
+			reject(signal.reason);
+		}
+
+		if (signal.aborted) abort();
+		else signal.addEventListener("abort", abort, { once: true });
+
+		promise.then(resolve, reject).finally(function cleanup(): void {
+			signal.removeEventListener("abort", abort);
+		});
+	});
+}
+
+/**
  * Longest delay `setTimeout` supports (2^31-1 ms, about 24.8 days).
  */
 const MAX_DELAY = 2_147_483_647;

@@ -37,6 +37,7 @@ import {
 	parseOperation,
 	resolveValue,
 	sha256,
+	raceAbort,
 	sleep,
 	type OperationInfo,
 } from "./utils";
@@ -390,15 +391,20 @@ export class Client {
 					INCREMENTAL_DIRECTIVE.test(query) ? `text/event-stream, ${MULTIPART_ACCEPT}` : "text/event-stream",
 				);
 
-				response = await this.#run(this.#createRequest(request, "POST", headers, scope.signal), context);
+				response = await raceAbort(
+					this.#run(this.#createRequest(request, "POST", headers, scope.signal), context),
+					scope.signal,
+				);
 
 				const contentType = response.headers.get("Content-Type") ?? "";
+				// Media types are case-insensitive (the boundary value is not).
+				const mediaType = contentType.toLowerCase();
 				const chunks =
 					!response.ok || !response.body
 						? undefined
-						: contentType.includes("text/event-stream")
+						: mediaType.includes("text/event-stream")
 							? readServerSentEventData(response.body, scope.signal)
-							: contentType.includes("multipart/mixed")
+							: mediaType.includes("multipart/mixed")
 								? readMultipartMixed(response.body, getBoundary(contentType), scope.signal)
 								: undefined;
 
@@ -407,7 +413,7 @@ export class Client {
 					return;
 				}
 
-				source = parseChunks(chunks);
+				source = parseChunks(chunks, response);
 			}
 
 			this.#log(operation, "streaming");
@@ -430,7 +436,12 @@ export class Client {
 				}
 			}
 
-			if (state.hasNext && !scope.signal.aborted) throw incompleteError(response, state.data);
+			if (state.hasNext) {
+				// An aborted incremental result never completes as if it succeeded with partial data.
+				scope.signal.throwIfAborted();
+
+				throw incompleteError(response, state.data);
+			}
 		} catch (error) {
 			if (!scope.signal.aborted) this.#report(error, context, options.signal);
 
@@ -689,7 +700,8 @@ export class Client {
 				const context: OperationContext = { ...operation, query, variables: options.variables, attempt };
 
 				try {
-					const data = await this.#send<TData>(query, options, context, scope.signal);
+					// Raced against the signal: a stalled middleware, header resolver or body must not outlive the timeout.
+					const data = await raceAbort(this.#send<TData>(query, options, context, scope.signal), scope.signal);
 
 					this.#log(operation, `ok in ${Date.now() - startedAt}ms${attempt ? ` after ${attempt} retries` : ""}`);
 
@@ -710,7 +722,12 @@ export class Client {
 
 					this.#log(operation, `retry ${attempt + 1}/${policy.attempts} in ${Math.round(delay)}ms`);
 
-					await sleep(delay, scope.signal);
+					try {
+						await sleep(delay, scope.signal);
+					} catch (sleepError) {
+						this.#report(sleepError, context, options.signal);
+						throw sleepError;
+					}
 				}
 			}
 		} finally {
@@ -866,7 +883,17 @@ export class Client {
 		function call(index: number, current: Request): Promise<Response> {
 			const handler = middleware[index];
 
-			if (!handler) return fetchFn(current).catch(rethrowNetworkFailure);
+			if (!handler) {
+				// `fetch` consumes the body: a clone lets middleware call `next()` again (e.g. after refreshing a token).
+				// Cloning a consumed request throws: that deterministic error is never mistaken for a network failure.
+				try {
+					current = current.clone();
+				} catch (error) {
+					return Promise.reject(error);
+				}
+
+				return fetchFn(current).catch(rethrowNetworkFailure);
+			}
 
 			return handler(
 				current,
@@ -955,12 +982,15 @@ export class Client {
 
 		try {
 			body =
-				response.ok && response.body && contentType.includes("multipart/mixed")
+				response.ok && response.body && contentType.toLowerCase().includes("multipart/mixed")
 					? await collectIncremental<TData>(response.body, getBoundary(contentType), signal)
 					: ((await response.json()) as GraphQLResponse<TData>);
 		} catch (cause) {
 			// Abort/timeout during body streaming must surface as-is, not as a parse error.
 			if (signal?.aborted) throw cause;
+
+			// A body failing mid-read (connection reset) is a network failure, retryable like one.
+			if (!(cause instanceof SyntaxError)) rethrowNetworkFailure(cause);
 
 			const message = response.ok ? "Invalid JSON in the GraphQL response." : describeStatus(response);
 
@@ -1387,10 +1417,21 @@ function ignoreError(): undefined {
  * Parses streamed JSON chunks.
  *
  * @param chunks - Raw JSON strings
+ * @param response - The response they come from
  * @yields The parsed payloads
  */
-async function* parseChunks(chunks: AsyncIterable<string>): AsyncGenerator<IncrementalPayload> {
-	for await (const chunk of chunks) yield JSON.parse(chunk) as IncrementalPayload;
+async function* parseChunks(chunks: AsyncIterable<string>, response: Response): AsyncGenerator<IncrementalPayload> {
+	for await (const chunk of chunks) {
+		let payload: IncrementalPayload;
+
+		try {
+			payload = JSON.parse(chunk) as IncrementalPayload;
+		} catch (cause) {
+			throw new ClientError("Invalid JSON in the GraphQL response.", { status: response.status, response, cause });
+		}
+
+		yield payload;
+	}
 }
 
 /**
