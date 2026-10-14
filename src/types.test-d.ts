@@ -1,5 +1,6 @@
 import { describe, expectTypeOf, it } from "vitest";
 import { Client } from "./client";
+import { graphql } from "./document";
 import type { TypedDocumentString } from "./types";
 
 const client = new Client({ url: "https://test.dev/graphql" });
@@ -31,6 +32,22 @@ describe("Client.gql types", function () {
 		const document = "query { a }" as unknown as TypedDocumentString<User, UserVariables>;
 
 		expectTypeOf(client.gql({ query: document, variables: { id: 1 } })).resolves.toEqualTypeOf<User>();
+
+		// @ts-expect-error variables must match the document
+		client.gql({ query: document, variables: { id: "1" } });
+	});
+});
+
+describe("graphql tag types", function () {
+	it("infers data and variables from tagged documents", function () {
+		const document = graphql<User, UserVariables>`
+			query {
+				a
+			}
+		`;
+
+		expectTypeOf(client.gql({ query: document, variables: { id: 1 } })).resolves.toEqualTypeOf<User>();
+		expectTypeOf(document).toMatchTypeOf<string>();
 
 		// @ts-expect-error variables must match the document
 		client.gql({ query: document, variables: { id: "1" } });

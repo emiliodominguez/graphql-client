@@ -27,7 +27,14 @@
 		"browser",
 		"node",
 		"deno",
-		"bun"
+		"bun",
+		"react",
+		"react-hooks",
+		"suspense",
+		"live-queries",
+		"defer",
+		"stream",
+		"file-upload"
 	],
 	"author": "Emilio Dominguez",
 	"license": "MIT",
@@ -54,6 +61,16 @@
 				"default": "./dist/index.cjs"
 			}
 		},
+		"./react": {
+			"import": {
+				"types": "./dist/react.d.ts",
+				"default": "./dist/react.js"
+			},
+			"require": {
+				"types": "./dist/react.d.cts",
+				"default": "./dist/react.cjs"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"files": [
@@ -76,11 +93,26 @@
 		"size": "node scripts/size.js",
 		"prepublishOnly": "yarn typecheck && yarn test && yarn build"
 	},
+	"peerDependencies": {
+		"react": ">=18"
+	},
+	"peerDependenciesMeta": {
+		"react": {
+			"optional": true
+		}
+	},
 	"devDependencies": {
+		"@testing-library/dom": "^10.4.2",
+		"@testing-library/react": "^16.3.3",
 		"@types/node": "^22",
+		"@types/react": "^19",
+		"@types/react-dom": "^19",
 		"@vitest/coverage-v8": "^5.0.4",
 		"esbuild": "^0.27.7",
+		"happy-dom": "^21.0.1",
 		"prettier": "^3.9.10",
+		"react": "^19",
+		"react-dom": "^19",
 		"tsup": "^8.5.1",
 		"typescript": "^5.9",
 		"vite": "^8.3.4",

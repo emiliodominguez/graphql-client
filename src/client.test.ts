@@ -347,6 +347,7 @@ describe("Client", function () {
 				return {
 					ok: true,
 					status: 200,
+					headers: new Headers(),
 					async json() {
 						controller.abort("stop");
 						throw controller.signal.reason;
@@ -410,13 +411,13 @@ describe("Client", function () {
 			expect(cache.size).toBe(0);
 		});
 
-		it("honors per-call cache overrides", async function () {
+		it("honors per-call fetch policies", async function () {
 			const { client, fetchMock } = setup({ cache: new MemoryCache() });
 
-			await client.gql({ query: GET_USER, cache: false });
-			await client.gql({ query: GET_USER, cache: false });
-			await client.gql({ query: UPDATE_USER, cache: true });
-			await client.gql({ query: UPDATE_USER, cache: true });
+			await client.gql({ query: GET_USER, fetchPolicy: "no-cache" });
+			await client.gql({ query: GET_USER, fetchPolicy: "no-cache" });
+			await client.gql({ query: UPDATE_USER, fetchPolicy: "cache-first" });
+			await client.gql({ query: UPDATE_USER, fetchPolicy: "cache-first" });
 
 			expect(fetchMock).toHaveBeenCalledTimes(3);
 		});

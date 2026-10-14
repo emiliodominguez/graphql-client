@@ -24,9 +24,10 @@ export type CacheKey = ReadonlyArray<string | number | boolean | null>;
  */
 export interface TypedDocumentString<TData, TVariables> extends String {
 	/**
-	 * Phantom field used exclusively for type inference. Never read at runtime.
+	 * Phantom member used exclusively for type inference. Never read at runtime.
+	 * Declared as a method so it is bivariant: generic code can accept any typed document.
 	 */
-	__apiType?: (variables: TVariables) => TData;
+	__apiType?(variables: TVariables): TData;
 }
 
 /**
@@ -209,8 +210,14 @@ export interface RequestOptions<TData, TVariables> {
 	operationName?: string;
 	/** Hierarchical cache key used for grouping and invalidation. Defaults to `[]`. */
 	key?: CacheKey;
-	/** Overrides caching for this call. Defaults to `true` for queries and `false` for mutations. */
-	cache?: boolean;
+	/**
+	 * How the cache is used. Defaults to `cache-first` for queries and `no-cache` for mutations.
+	 * - `cache-first`: serve from the cache, fetch on a miss and store the result
+	 * - `network-only`: always fetch, store the result
+	 * - `cache-only`: serve from the cache, throw on a miss
+	 * - `no-cache`: always fetch, never read nor write the cache
+	 */
+	fetchPolicy?: FetchPolicy;
 	/** Extra headers merged on top of the client headers */
 	headers?: HeadersInit;
 	/** Abort signal for this call */
@@ -232,4 +239,51 @@ export interface RequestOptions<TData, TVariables> {
 export type SubscribeOptions<TData, TVariables> = Pick<
 	RequestOptions<TData, TVariables>,
 	"query" | "variables" | "operationName" | "headers" | "signal"
+>;
+
+/**
+ * Cache usage strategy for a request. See {@link RequestOptions.fetchPolicy}.
+ */
+export type FetchPolicy = "cache-first" | "network-only" | "cache-only" | "no-cache";
+
+/**
+ * Snapshot of a watched query.
+ *
+ * @template TData - The shape of the `data` field
+ */
+export interface QueryState<TData> {
+	/** Latest data. Kept while refetching or after an error (stale-while-revalidate). */
+	data: TData | undefined;
+	/** Error of the latest fetch, cleared by the next successful one */
+	error: unknown;
+	/** Whether a fetch is in progress */
+	loading: boolean;
+}
+
+/**
+ * Options for {@link Client.watch}.
+ *
+ * @template TData - The shape of the `data` field in the response
+ * @template TVariables - The shape of the operation variables
+ */
+export interface WatchOptions<TData, TVariables> extends RequestOptions<TData, TVariables> {
+	/** Refetch every N milliseconds while observed */
+	pollInterval?: number;
+	/** Refetch when the page becomes visible again */
+	refetchOnFocus?: boolean;
+	/** Refetch when the network comes back online */
+	refetchOnReconnect?: boolean;
+	/** Data to start from when the cache has none, treated as fresh (e.g. server-provided or suspense data) */
+	initialData?: TData;
+}
+
+/**
+ * Identifies a cache entry for {@link Client.read} / {@link Client.write}.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ */
+export type CacheTarget<TData, TVariables> = Pick<
+	RequestOptions<TData, TVariables>,
+	"query" | "variables" | "operationName" | "key"
 >;

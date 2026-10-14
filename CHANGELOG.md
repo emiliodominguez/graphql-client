@@ -4,6 +4,17 @@
 
 ### Added
 
+- React bindings (`@emiliodominguez/graphql-client/react`): `GraphQLProvider`, `useQuery`, `useSuspenseQuery`, `useMutation`, `useSubscription` and `useClient`.
+- Live queries (`client.watch()`). They activate lazily, keep stale data visible while revalidating, and refetch on invalidation, polling, focus and reconnect.
+- Fetch policies (`cache-first`, `network-only`, `cache-only`, `no-cache`).
+- `client.read()` and `client.write()` for optimistic updates. `write()` notifies watchers.
+- `client.extract()` and `client.restore()` for SSR hydration.
+- `@defer` / `@stream` incremental delivery over `multipart/mixed` and SSE, in both the current and the 2022 payload formats.
+- File uploads following the GraphQL multipart request spec, detected automatically.
+- The `graphql` template tag, with typed documents and fragment dedupe, plus `minify()` and `dedupeFragments()`.
+- `StorageCache`, a persistent cache backed by Web Storage.
+- `initialData` for watched queries.
+
 - Retries with exponential backoff, jitter and `Retry-After` support (`retry`). The `isRetryable` predicate is exported.
 - Fetch-level middleware over standard `Request` and `Response` objects (`middleware`).
 - `GET` requests for queries (`method: "GET"`).
@@ -14,6 +25,11 @@
 - A bundle size budget enforced in CI.
 
 ### Changed
+
+- **Breaking:** the per-call `cache?: boolean` option is replaced by `fetchPolicy`. Use `"no-cache"` for `cache: false` and `"cache-first"` for `cache: true`.
+- The last request for a cache key wins: a superseded response no longer overwrites the cache or notifies watchers.
+- Stream readers cancel on abort even when the body isn't tied to a `fetch`, for example a response returned by middleware.
+- `TypedDocumentString.__apiType` is now declared as a method, which makes it bivariant. It remains structurally compatible with codegen.
 
 - The transport now passes a `Request` object to `fetch`.
 - The timeout covers the whole operation, retries included.

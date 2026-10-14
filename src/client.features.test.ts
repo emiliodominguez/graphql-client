@@ -535,6 +535,6 @@ describe("subscribe", function () {
 			// drain
 		}
 
-		expect(consoleDebug).toHaveBeenCalledWith("[graphql-client] subscription OnMessage → subscribed");
+		expect(consoleDebug).toHaveBeenCalledWith("[graphql-client] subscription OnMessage → streaming");
 	});
 });

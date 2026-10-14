@@ -13,10 +13,15 @@ export interface ServerSentEvent {
  * (any line ending, multi-line data, comments). Cancels the stream when the consumer stops early.
  *
  * @param stream - The response body
+ * @param signal - Cancels the stream when aborted, even if the body is not tied to a fetch
  * @yields Every dispatched event
  */
-export async function* readServerSentEvents(stream: ReadableStream<Uint8Array>): AsyncGenerator<ServerSentEvent> {
+export async function* readServerSentEvents(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+): AsyncGenerator<ServerSentEvent> {
 	const reader = stream.getReader();
+	const release = cancelOnAbort(reader, signal);
 	const decoder = new TextDecoder();
 	let buffer = "";
 	let finished = false;
@@ -40,6 +45,8 @@ export async function* readServerSentEvents(stream: ReadableStream<Uint8Array>):
 			}
 		}
 	} finally {
+		release();
+
 		if (!finished) await reader.cancel().catch(ignore);
 
 		reader.releaseLock();
@@ -54,7 +61,7 @@ export async function* readServerSentEvents(stream: ReadableStream<Uint8Array>):
  * @param done - Whether the stream ended
  * @returns The normalized text
  */
-function normalizeLineEndings(text: string, done: boolean): string {
+export function normalizeLineEndings(text: string, done: boolean): string {
 	const hold = !done && text.endsWith("\r");
 	const normalized = (hold ? text.slice(0, -1) : text).replace(/\r\n?/g, "\n");
 
@@ -85,6 +92,29 @@ function parseEvent(block: string): ServerSentEvent | undefined {
 	if (event === undefined && data.length === 0) return undefined;
 
 	return { event: event || "message", data: data.join("\n") };
+}
+
+/**
+ * Cancels a stream reader when a signal aborts, so pending reads settle.
+ *
+ * @param reader - The stream reader
+ * @param signal - The abort signal
+ * @returns Removes the abort listener
+ */
+export function cancelOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): () => void {
+	/**
+	 * Cancels the reader with the abort reason.
+	 */
+	function cancel(): void {
+		reader.cancel(signal?.reason).catch(ignore);
+	}
+
+	if (signal?.aborted) cancel();
+	else signal?.addEventListener("abort", cancel, { once: true });
+
+	return function release(): void {
+		signal?.removeEventListener("abort", cancel);
+	};
 }
 
 /**

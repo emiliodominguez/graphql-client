@@ -1,15 +1,30 @@
 import { ClientError, isClientError } from "./errors";
+import {
+	applyIncremental,
+	createIncrementalState,
+	getBoundary,
+	INCREMENTAL_DIRECTIVE,
+	MULTIPART_ACCEPT,
+	readMultipartMixed,
+	type IncrementalPayload,
+	type IncrementalState,
+} from "./incremental";
+import { QueryRef, type QueryWatcher } from "./query-ref";
 import { resolveRetryPolicy } from "./retry";
 import { readServerSentEvents } from "./sse";
 import type {
 	CacheKey,
+	CacheTarget,
 	ClientConfiguration,
+	FetchPolicy,
 	GraphQLFormattedError,
 	GraphQLResponse,
 	OperationContext,
 	RequestOptions,
 	SubscribeOptions,
+	WatchOptions,
 } from "./types";
+import { createUploadBody } from "./upload";
 import {
 	createAbortScope,
 	createCacheKey,
@@ -43,7 +58,7 @@ type TransportOptions = Pick<RequestOptions<unknown, unknown>, "variables" | "op
 
 /**
  * Lightweight, zero-dependency GraphQL client with caching, deduplication, retries, middleware,
- * persisted queries, SSE subscriptions, timeouts and typed errors.
+ * persisted queries, uploads, incremental delivery, SSE subscriptions, live queries, timeouts and typed errors.
  */
 export class Client {
 	/**
@@ -62,6 +77,22 @@ export class Client {
 	private persistedQueriesSupported = true;
 
 	/**
+	 * Watched queries keyed by their cache key.
+	 */
+	private readonly watchers = new Map<string, Set<QueryWatcher<unknown>>>();
+
+	/**
+	 * Latest request sequence per cache key: a response superseded by a newer request for the same key
+	 * neither overwrites the cache nor notifies watchers (last request wins).
+	 */
+	private readonly latest = new Map<string, number>();
+
+	/**
+	 * Monotonic request counter feeding {@link Client.latest}.
+	 */
+	private sequence = 0;
+
+	/**
 	 * @param configuration - Configuration for the client
 	 */
 	constructor(private readonly configuration: ClientConfiguration) {}
@@ -69,8 +100,9 @@ export class Client {
 	/**
 	 * Executes a GraphQL query or mutation.
 	 *
-	 * Queries are served from the cache when available and deduplicated while in flight.
-	 * Mutations always hit the network and are never cached unless `cache: true` is passed.
+	 * Queries are served from the cache when available (`cache-first`) and deduplicated while in flight.
+	 * Mutations always hit the network and are never cached unless another `fetchPolicy` is passed.
+	 * Documents using `@defer` / `@stream` resolve once every incremental payload has been merged.
 	 *
 	 * @template TData - The shape of the `data` field in the response
 	 * @template TVariables - The shape of the operation variables
@@ -78,6 +110,7 @@ export class Client {
 	 * @returns The `data` field of the GraphQL response
 	 * @throws {ClientError} On a non-2xx status, GraphQL errors, an unparseable body or a missing `data` field
 	 * @throws {DOMException} `AbortError` / `TimeoutError` when the request is aborted or times out
+	 * @throws {Error} With `cache-only` when nothing is cached
 	 */
 	async gql<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		options: RequestOptions<TData, TVariables>,
@@ -87,15 +120,20 @@ export class Client {
 		const operation = parseOperation(query, options.operationName);
 		const isQuery = operation.type === "query";
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
-		const useCache = cache !== undefined && (options.cache ?? isQuery);
+		const fetchPolicy = options.fetchPolicy ?? (isQuery ? "cache-first" : "no-cache");
+		const readsCache = fetchPolicy === "cache-first" || fetchPolicy === "cache-only";
 
-		if (useCache) {
+		if (cache && readsCache) {
 			const cached = await cache.get<TData>(cacheKey);
 
 			if (cached !== undefined) {
 				this.log(operation, "cache hit");
 				return cached;
 			}
+		}
+
+		if (fetchPolicy === "cache-only") {
+			throw new Error(`No cached data for ${operation.type} ${operation.name ?? "(anonymous)"} (cache-only).`);
 		}
 
 		// Calls carrying their own signal, headers, timeout or retry policy may legitimately diverge,
@@ -114,7 +152,7 @@ export class Client {
 			return pending as Promise<TData>;
 		}
 
-		const request = this.execute<TData, TVariables>(query, options, operation, useCache ? cacheKey : undefined);
+		const request = this.execute<TData, TVariables>(query, options, operation, cacheKey, fetchPolicy !== "no-cache");
 
 		if (!canDedupe) return request;
 
@@ -128,7 +166,8 @@ export class Client {
 	}
 
 	/**
-	 * Streams an operation over Server-Sent Events (GraphQL over SSE, "distinct connections" mode).
+	 * Streams an operation: subscriptions over Server-Sent Events (GraphQL over SSE, "distinct connections" mode),
+	 * or `@defer` / `@stream` queries over SSE or `multipart/mixed`. Each yielded value is the merged result so far.
 	 * Breaking out of the loop, or aborting `signal`, closes the connection.
 	 * A server answering with a single JSON result yields it once.
 	 *
@@ -140,8 +179,8 @@ export class Client {
 	 * @template TData - The shape of each `data` payload
 	 * @template TVariables - The shape of the operation variables
 	 * @param options - The subscription options
-	 * @yields Every `data` payload sent by the server
-	 * @throws {ClientError} On a non-2xx status or when an event carries GraphQL errors
+	 * @yields Every `data` payload (or merged incremental result) sent by the server
+	 * @throws {ClientError} On a non-2xx status or when a payload carries GraphQL errors
 	 */
 	async *subscribe<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		options: SubscribeOptions<TData, TVariables>,
@@ -152,29 +191,39 @@ export class Client {
 		const context: OperationContext = { ...operation, query, variables: options.variables, attempt: 0 };
 
 		try {
-			const headers = await this.createHeaders(options.headers);
+			const headers = await this.createHeaders(query, options.headers);
 
-			headers.set("Accept", "text/event-stream");
+			headers.set(
+				"Accept",
+				INCREMENTAL_DIRECTIVE.test(query) ? `text/event-stream, ${MULTIPART_ACCEPT}` : "text/event-stream",
+			);
 
 			const payload: Payload = { query, variables: options.variables, operationName: options.operationName };
 			const response = await this.run(this.createRequest(payload, "POST", headers, scope.signal), context);
-			const isStream = response.headers.get("Content-Type")?.includes("text/event-stream");
+			const contentType = response.headers.get("Content-Type") ?? "";
+			const source =
+				!response.ok || !response.body
+					? undefined
+					: contentType.includes("text/event-stream")
+						? readServerSentEventData(response.body, scope.signal)
+						: contentType.includes("multipart/mixed")
+							? readMultipartMixed(response.body, getBoundary(contentType), scope.signal)
+							: undefined;
 
-			if (!response.ok || !isStream || !response.body) {
+			if (!source) {
 				yield await this.parseResponse<TData>(response, scope.signal);
 				return;
 			}
 
-			this.log(operation, "subscribed");
+			this.log(operation, "streaming");
 
-			for await (const event of readServerSentEvents(response.body)) {
-				if (event.event === "complete") return;
-				if ((event.event !== "next" && event.event !== "message") || !event.data) continue;
+			const state = createIncrementalState();
 
-				const { data, errors } = JSON.parse(event.data) as GraphQLResponse<TData>;
+			for await (const chunk of source) {
+				const { data, errors } = applyIncremental(state, JSON.parse(chunk) as IncrementalPayload);
 
-				if (errors?.length) throw createGraphQLError(response, errors, data ?? undefined);
-				if (data !== undefined && data !== null) yield data;
+				if (errors.length) throw createGraphQLError(response, errors, data);
+				if (data !== undefined) yield data as TData;
 			}
 		} finally {
 			scope.abort();
@@ -183,26 +232,140 @@ export class Client {
 	}
 
 	/**
+	 * Creates an observable query (live query). See {@link QueryRef}: lazy activation, stale-while-revalidate,
+	 * automatic refetch on invalidation, polling, focus and reconnect, and sync with other fetches of the same key.
+	 *
+	 * @example
+	 * const ref = client.watch({ key: ["todos"], query: TODOS, pollInterval: 30_000 });
+	 * const unsubscribe = ref.subscribe(function render({ data, error, loading }) { ... });
+	 *
+	 * @template TData - The shape of the `data` field in the response
+	 * @template TVariables - The shape of the operation variables
+	 * @param options - The query and watch options
+	 * @returns The observable query
+	 */
+	watch<TData = unknown, TVariables extends object = Record<string, unknown>>(
+		options: WatchOptions<TData, TVariables>,
+	): QueryRef<TData> {
+		const client = this;
+		const query = String(options.query);
+		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
+		const readsCache =
+			options.fetchPolicy === undefined ||
+			options.fetchPolicy === "cache-first" ||
+			options.fetchPolicy === "cache-only";
+
+		return new QueryRef<TData>(
+			{
+				fetch(fetchPolicy: FetchPolicy): Promise<TData> {
+					return client.gql<TData, TVariables>({ ...options, fetchPolicy });
+				},
+				peek(): TData | undefined {
+					const cached = readsCache ? client.configuration.cache?.get<TData>(cacheKey) : undefined;
+
+					return cached instanceof Promise ? undefined : cached;
+				},
+				hasCache(): boolean {
+					return client.configuration.cache !== undefined;
+				},
+				register(watcher: QueryWatcher<TData>): () => void {
+					return client.register(cacheKey, watcher as QueryWatcher<unknown>);
+				},
+			},
+			options,
+		);
+	}
+
+	/**
+	 * Reads a cached result without touching the network.
+	 *
+	 * @template TData - The shape of the `data` field
+	 * @template TVariables - The shape of the operation variables
+	 * @param target - Identifies the entry (same fields as the request that produced it)
+	 * @returns The cached data, or `undefined`
+	 */
+	async read<TData = unknown, TVariables extends object = Record<string, unknown>>(
+		target: CacheTarget<TData, TVariables>,
+	): Promise<TData | undefined> {
+		return this.configuration.cache?.get<TData>(this.getCacheKey(target));
+	}
+
+	/**
+	 * Writes a result into the cache and pushes it to every watcher of that entry.
+	 * The building block for optimistic updates: write the expected data, then `invalidate` or roll back.
+	 *
+	 * @template TData - The shape of the `data` field
+	 * @template TVariables - The shape of the operation variables
+	 * @param target - Identifies the entry (same fields as the request that reads it)
+	 * @param data - The data to store
+	 */
+	async write<TData = unknown, TVariables extends object = Record<string, unknown>>(
+		target: CacheTarget<TData, TVariables>,
+		data: TData,
+	): Promise<void> {
+		const cacheKey = this.getCacheKey(target);
+
+		await this.configuration.cache?.set(cacheKey, data);
+		this.notify(cacheKey, data);
+	}
+
+	/**
+	 * Serializes every result cached by this client, e.g. to hydrate a browser client after SSR.
+	 *
+	 * @returns A JSON-serializable snapshot
+	 */
+	async extract(): Promise<Record<string, unknown>> {
+		const cache = this.configuration.cache;
+		const snapshot: Record<string, unknown> = {};
+
+		if (!cache) return snapshot;
+
+		for (const key of await cache.keys()) {
+			if (!matchesKeyPrefix(key, [])) continue;
+
+			const data = await cache.get(key);
+
+			if (data !== undefined) snapshot[key] = data;
+		}
+
+		return snapshot;
+	}
+
+	/**
+	 * Loads a snapshot produced by {@link Client.extract} into the cache.
+	 *
+	 * @param snapshot - The snapshot
+	 */
+	async restore(snapshot: Record<string, unknown>): Promise<void> {
+		for (const [key, data] of Object.entries(snapshot)) {
+			await this.configuration.cache?.set(key, data);
+			this.notify(key, data);
+		}
+	}
+
+	/**
 	 * Removes cached results. Keys are hierarchical: `invalidate(["user"])` drops `["user"]`, `["user", 1]`, etc.
 	 * Calling it without arguments drops every result cached by this client.
+	 * Active watched queries under the prefix refetch automatically.
 	 *
 	 * @param prefix - The cache key prefix to invalidate. Defaults to `[]` (everything).
-	 * @returns The number of removed entries
+	 * @returns The number of removed cache entries
 	 */
 	async invalidate(prefix: CacheKey = []): Promise<number> {
 		const cache = this.configuration.cache;
-
-		if (!cache) return 0;
-
-		const keys = [...(await cache.keys())].filter(function belongsToPrefix(key: string): boolean {
-			return matchesKeyPrefix(key, prefix);
-		});
+		const keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
 
 		await Promise.all(
 			keys.map(function remove(key: string): unknown {
-				return cache.delete(key);
+				return cache?.delete(key);
 			}),
 		);
+
+		for (const [key, watchers] of this.watchers) {
+			if (!matchesKeyPrefix(key, prefix)) continue;
+
+			for (const watcher of [...watchers]) watcher.invalidate();
+		}
 
 		return keys.length;
 	}
@@ -226,18 +389,23 @@ export class Client {
 	 * @param query - The GraphQL document
 	 * @param options - The request options
 	 * @param operation - The parsed operation info
-	 * @param cacheKey - Key to store the result under, or `undefined` to skip caching
+	 * @param cacheKey - Key identifying the result
+	 * @param writesCache - Whether to store the result
 	 * @returns The `data` field of the GraphQL response
 	 */
 	private async execute<TData, TVariables>(
 		query: string,
 		options: RequestOptions<TData, TVariables>,
 		operation: OperationInfo,
-		cacheKey?: string,
+		cacheKey: string,
+		writesCache: boolean,
 	): Promise<TData> {
 		const scope = createAbortScope(options.signal, options.timeout ?? this.configuration.timeout);
 		const policy = resolveRetryPolicy(this.configuration.retry, options.retry);
 		const startedAt = Date.now();
+		const sequence = ++this.sequence;
+
+		this.latest.set(cacheKey, sequence);
 
 		try {
 			for (let attempt = 0; ; attempt++) {
@@ -248,8 +416,12 @@ export class Client {
 
 					this.log(operation, `ok in ${Date.now() - startedAt}ms${attempt ? ` after ${attempt} retries` : ""}`);
 
-					if (cacheKey !== undefined) {
-						await this.configuration.cache?.set(cacheKey, data);
+					if (this.latest.get(cacheKey) === sequence) {
+						this.latest.delete(cacheKey);
+
+						if (writesCache) await this.configuration.cache?.set(cacheKey, data);
+
+						this.notify(cacheKey, data);
 					}
 
 					for (const prefix of options.invalidates ?? []) {
@@ -271,6 +443,8 @@ export class Client {
 			}
 		} finally {
 			scope.dispose();
+
+			if (this.latest.get(cacheKey) === sequence) this.latest.delete(cacheKey);
 		}
 	}
 
@@ -346,7 +520,7 @@ export class Client {
 		context: OperationContext,
 		signal: AbortSignal,
 	): Promise<TData> {
-		const headers = await this.createHeaders(options.headers);
+		const headers = await this.createHeaders(context.query, options.headers);
 		const response = await this.run(this.createRequest(payload, method, headers, signal), context);
 
 		return this.parseResponse<TData>(response, signal);
@@ -354,7 +528,8 @@ export class Client {
 
 	/**
 	 * Creates the `Request`. GET requests carry the payload as search params and drop `Content-Type`
-	 * so they stay CORS-simple and CDN-cacheable.
+	 * so they stay CORS-simple and CDN-cacheable. Variables containing files switch to a multipart POST
+	 * (GraphQL multipart request spec).
 	 *
 	 * @param payload - The GraphQL payload
 	 * @param method - The HTTP method
@@ -364,6 +539,14 @@ export class Client {
 	 */
 	private createRequest(payload: Payload, method: "GET" | "POST", headers: Headers, signal: AbortSignal): Request {
 		const { url } = this.configuration;
+		const upload = createUploadBody(payload);
+
+		if (upload) {
+			// Let fetch set the multipart boundary.
+			headers.delete("Content-Type");
+
+			return new Request(url, { method: "POST", headers, body: upload, signal });
+		}
 
 		if (method === "POST") {
 			return new Request(url, { method, headers, body: JSON.stringify(payload), signal });
@@ -437,13 +620,16 @@ export class Client {
 
 	/**
 	 * Builds the request headers. Precedence (lowest to highest): defaults, auth token, client headers, call headers.
+	 * Documents using `@defer` / `@stream` also advertise `multipart/mixed`.
 	 *
+	 * @param query - The GraphQL document
 	 * @param requestHeaders - Headers for this call only
 	 * @returns The merged headers
 	 */
-	private async createHeaders(requestHeaders?: HeadersInit): Promise<Headers> {
+	private async createHeaders(query: string, requestHeaders?: HeadersInit): Promise<Headers> {
 		const { authToken, headers } = this.configuration;
-		const merged = new Headers({ "Content-Type": "application/json", Accept: ACCEPT });
+		const accept = INCREMENTAL_DIRECTIVE.test(query) ? `${MULTIPART_ACCEPT}, ${ACCEPT}` : ACCEPT;
+		const merged = new Headers({ "Content-Type": "application/json", Accept: accept });
 		const token = authToken === undefined ? undefined : await resolveValue(authToken);
 
 		if (token) {
@@ -472,10 +658,14 @@ export class Client {
 	 */
 	private async parseResponse<TData>(response: Response, signal?: AbortSignal): Promise<TData> {
 		const { status } = response;
+		const contentType = response.headers.get("Content-Type") ?? "";
 		let body: GraphQLResponse<TData> | undefined;
 
 		try {
-			body = (await response.json()) as GraphQLResponse<TData>;
+			body =
+				response.ok && response.body && contentType.includes("multipart/mixed")
+					? await collectIncremental<TData>(response.body, getBoundary(contentType), signal)
+					: ((await response.json()) as GraphQLResponse<TData>);
 		} catch (cause) {
 			// Abort/timeout during body streaming must surface as-is, not as a parse error.
 			if (signal?.aborted) throw cause;
@@ -499,6 +689,48 @@ export class Client {
 		}
 
 		return data;
+	}
+
+	/**
+	 * Registers a watcher for a cache key.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param watcher - The watcher
+	 * @returns The unregister function
+	 */
+	private register(cacheKey: string, watcher: QueryWatcher<unknown>): () => void {
+		const { watchers } = this;
+		const set = watchers.get(cacheKey) ?? new Set();
+
+		set.add(watcher);
+		watchers.set(cacheKey, set);
+
+		return function unregister(): void {
+			set.delete(watcher);
+			if (set.size === 0 && watchers.get(cacheKey) === set) watchers.delete(cacheKey);
+		};
+	}
+
+	/**
+	 * Pushes fresh data to every watcher of a cache key.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param data - The data
+	 */
+	private notify(cacheKey: string, data: unknown): void {
+		for (const watcher of [...(this.watchers.get(cacheKey) ?? [])]) watcher.receive(data);
+	}
+
+	/**
+	 * Computes the cache key of a read/write target.
+	 *
+	 * @template TData - The shape of the `data` field
+	 * @template TVariables - The shape of the operation variables
+	 * @param target - The target
+	 * @returns The serialized cache key
+	 */
+	private getCacheKey<TData, TVariables>(target: CacheTarget<TData, TVariables>): string {
+		return createCacheKey(target.key ?? [], String(target.query), target.variables, target.operationName);
 	}
 
 	/**
@@ -527,6 +759,55 @@ function createGraphQLError(response: Response, errors: ReadonlyArray<GraphQLFor
 	const message = response.ok ? summary : `${describeStatus(response)}: ${summary}`;
 
 	return new ClientError(message, { status: response.status, response, errors, data });
+}
+
+/**
+ * Creates a filter matching serialized cache keys under a prefix.
+ *
+ * @param prefix - The key prefix
+ * @returns The filter
+ */
+function belongsTo(prefix: CacheKey): (key: string) => boolean {
+	return function belongsToPrefix(key: string): boolean {
+		return matchesKeyPrefix(key, prefix);
+	};
+}
+
+/**
+ * Yields the data of SSE `next`/`message` events until `complete`.
+ *
+ * @param body - The response body
+ * @param signal - The abort signal
+ * @yields Each event payload
+ */
+async function* readServerSentEventData(body: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<string> {
+	for await (const event of readServerSentEvents(body, signal)) {
+		if (event.event === "complete") return;
+		if ((event.event === "next" || event.event === "message") && event.data) yield event.data;
+	}
+}
+
+/**
+ * Consumes a whole `multipart/mixed` incremental response and returns the merged result.
+ *
+ * @template TData - The shape of the `data` field
+ * @param body - The response body
+ * @param boundary - The multipart boundary
+ * @param signal - The abort signal
+ * @returns The merged response
+ */
+async function collectIncremental<TData>(
+	body: ReadableStream<Uint8Array>,
+	boundary: string,
+	signal?: AbortSignal,
+): Promise<GraphQLResponse<TData>> {
+	const state: IncrementalState = createIncrementalState();
+
+	for await (const chunk of readMultipartMixed(body, boundary, signal)) {
+		applyIncremental(state, JSON.parse(chunk) as IncrementalPayload);
+	}
+
+	return { data: state.data as TData | undefined, errors: state.errors.length ? state.errors : undefined };
 }
 
 /**

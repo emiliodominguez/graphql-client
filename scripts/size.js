@@ -1,38 +1,63 @@
 import { readFileSync } from "node:fs";
 import { brotliCompressSync, gzipSync } from "node:zlib";
-import { transformSync } from "esbuild";
-
-const FILES = ["dist/index.js", "dist/index.cjs"];
+import { buildSync, transformSync } from "esbuild";
 
 /**
- * Maximum min+gzip size of the ESM bundle, in bytes. CI fails above it.
+ * Maximum min+gzip size of a typical app import (`Client` + `MemoryCache`, tree-shaken), in bytes. CI fails above it.
  */
-const BUDGET = 4.5 * 1024;
+const BUDGET = 6.5 * 1024;
 
 /**
- * Prints the minified, gzip and brotli sizes of the built bundles (what consumers actually ship)
- * and fails when the ESM bundle exceeds the budget.
+ * What a typical app imports.
+ */
+const TYPICAL_IMPORT = 'import { Client, MemoryCache } from "./dist/index.js"; console.log(Client, MemoryCache);';
+
+/**
+ * Prints minified, gzip and brotli sizes for the full bundles and for a tree-shaken typical import,
+ * and fails when the typical import exceeds the budget.
  */
 function main() {
-	for (const file of FILES) {
-		const { code } = transformSync(readFileSync(file, "utf8"), { minify: true, loader: "js" });
-		const minified = Buffer.from(code);
-		const gzip = gzipSync(minified, { level: 9 }).length;
-
-		console.log(
-			[
-				file.padEnd(16),
-				`${format(minified.length)} min`,
-				`${format(gzip)} gzip`,
-				`${format(brotliCompressSync(minified).length)} brotli`,
-			].join("  "),
-		);
-
-		if (file.endsWith(".js") && gzip > BUDGET) {
-			console.error(`\nSize budget exceeded: ${format(gzip)} > ${format(BUDGET)} (min+gzip)`);
-			process.exitCode = 1;
-		}
+	for (const file of ["dist/index.js", "dist/index.cjs", "dist/react.js"]) {
+		report(file, transformSync(readFileSync(file, "utf8"), { minify: true, loader: "js" }).code);
 	}
+
+	const { outputFiles } = buildSync({
+		stdin: { contents: TYPICAL_IMPORT, resolveDir: process.cwd(), loader: "js" },
+		bundle: true,
+		minify: true,
+		format: "esm",
+		write: false,
+		external: ["react"],
+	});
+	const gzip = report("Client + MemoryCache", outputFiles[0].text);
+
+	if (gzip > BUDGET) {
+		console.error(`\nSize budget exceeded: ${format(gzip)} > ${format(BUDGET)} (min+gzip)`);
+		process.exitCode = 1;
+	}
+}
+
+/**
+ * Prints the sizes of a minified bundle.
+ *
+ * @param {string} label - Row label
+ * @param {string} code - Minified code
+ * @returns {number} The gzip size in bytes
+ */
+function report(label, code) {
+	const minified = Buffer.from(code);
+	const gzip = gzipSync(minified, { level: 9 }).length;
+
+	console.log(
+		[
+			label.padEnd(22),
+			`${format(minified.length)} min`,
+			`${format(gzip)} gzip`,
+			`${format(brotliCompressSync(minified).length)} brotli`,
+		].join("  "),
+	);
+
+	return gzip;
 }
 
 /**

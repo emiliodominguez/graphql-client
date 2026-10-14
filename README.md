@@ -1,25 +1,43 @@
 # GraphQL Client
 
 [![CI](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml)
-![Size](https://img.shields.io/badge/min%2Bgzip-~3.9%20kB-blue)
+![Size](https://img.shields.io/badge/min%2Bgzip-~6%20kB-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-A lightweight, zero-dependency, fully typed GraphQL client. Around 3.9 kB min+gzip, with features you'd normally get from a much bigger client.
+A lightweight, zero-dependency, fully typed GraphQL client. It gives you the features of a heavier client in about 6 kB min+gzip, plus about 1.2 kB for the React hooks.
 
-- **Zero dependencies.** Ships ESM and CJS and runs anywhere `fetch` exists: browsers, Node 20+, Deno, Bun and edge runtimes.
-- **O(1) LRU cache with TTL.** The cache is pluggable and accepts sync or async adapters (memory, `localStorage`, IndexedDB, Redis).
-- **Safe for mutations.** Only queries are cached. Mutations always go to the network, and `invalidates` clears related entries after a successful mutation.
-- **Request deduplication.** Identical queries that are in flight at the same time share one network request.
-- **Hierarchical invalidation.** `invalidate(["user"])` drops `["user", 1]`, `["user", 2, "posts"]` and so on.
-- **Retries.** Exponential backoff with jitter that honors `Retry-After`. Only queries are retried by default.
+**Transport**
+
+- **Fetch-native.** Runs anywhere `fetch` exists: browsers, Node 20+, Deno, Bun and edge runtimes. Ships ESM and CJS, and works with GraphQL over HTTP and any spec-compliant server.
 - **Middleware.** Composable wrappers over standard `Request` and `Response` objects, for auth refresh, tracing, logging or mocking.
-- **Automatic Persisted Queries and GET.** Send small hashed requests that a CDN can cache.
-- **Subscriptions over SSE.** `for await` over GraphQL-over-SSE streams, with no WebSocket library.
-- **Typed end to end.** Generics, or zero-config inference from GraphQL Code Generator's `TypedDocumentString`.
-- **Typed errors.** `ClientError` carries the status, the GraphQL `errors`, any partial `data` and the raw `Response`.
+- **Retries.** Exponential backoff with jitter that honors `Retry-After`. Only queries are retried by default.
 - **Timeouts and `AbortSignal`.** Set them per client or per call, and they cover retries too.
-- **Dynamic auth and headers.** Pass sync or async factories, and derive scoped clients with `extend()`.
+- **Automatic Persisted Queries and GET.** Send small hashed requests that a CDN can cache. `minify()` shortens documents further.
+- **File uploads.** Follows the GraphQL multipart request spec, and switches on automatically when variables contain a `File` or `Blob`.
+- **`@defer` / `@stream`.** Incremental delivery over `multipart/mixed` or SSE, in both the current and the 2022 payload formats.
+- **Subscriptions over SSE.** `for await` over GraphQL-over-SSE streams, with no WebSocket library.
+
+**Data**
+
+- **Document cache.** O(1) LRU with TTL (`MemoryCache`), persistent `StorageCache`, or any sync or async adapter you write.
+- **Fetch policies.** `cache-first`, `network-only`, `cache-only` and `no-cache`. Mutations are never cached by default.
+- **Deduplication and race safety.** Identical in-flight queries share one request, and the last request for a cache key always wins.
+- **Hierarchical invalidation.** `invalidate(["user"])` drops `["user", 1]`, `["user", 2, "posts"]` and so on. Mutations can do this declaratively with `invalidates`.
+- **Live queries.** `client.watch()` refetches on invalidation, polling, focus and reconnect, and keeps showing stale data while it revalidates.
+- **Optimistic updates.** `client.write()` pushes data to every component watching that entry.
+- **SSR.** `extract()` and `restore()` move the cache from server to browser, and hooks render cached data on the server.
+
+**DX**
+
+- **React.** `useQuery`, `useSuspenseQuery`, `useMutation` and `useSubscription`, safe under `StrictMode` and SSR.
+- **Typed end to end.** Use the `graphql<TData, TVariables>` tag, generics, or zero-config GraphQL Code Generator documents.
+- **`graphql` tag.** Compose fragments, with duplicated fragment definitions removed automatically.
+- **Typed errors.** `ClientError` carries the status, the GraphQL `errors`, any partial `data` and the raw `Response`.
+
+## Contents
+
+[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [API](#api) · [Size](#size)
 
 ## Install
 
@@ -32,7 +50,7 @@ npm i @emiliodominguez/graphql-client
 ## Quick start
 
 ```ts
-import { Client, MemoryCache } from "@emiliodominguez/graphql-client";
+import { Client, MemoryCache, graphql } from "@emiliodominguez/graphql-client";
 
 const client = new Client({
 	url: "https://rickandmortyapi.com/graphql",
@@ -40,96 +58,223 @@ const client = new Client({
 	timeout: 10_000,
 });
 
-const { character } = await client.gql<{ character: { name: string } }>({
-	key: ["character", 1],
-	query: /* GraphQL */ `
-		query Character($id: ID!) {
-			character(id: $id) {
-				name
-			}
+const CHARACTER = graphql<{ character: { name: string } }, { id: string }>`
+	query Character($id: ID!) {
+		character(id: $id) {
+			name
 		}
-	`,
-	variables: { id: 1 },
-});
+	}
+`;
+
+const { character } = await client.gql({ key: ["character", 1], query: CHARACTER, variables: { id: "1" } });
 ```
 
 ## Typed documents
 
-Pass `TData` and, optionally, `TVariables` explicitly:
+There are three ways to type a document, and you can mix them:
 
 ```ts
-const data = await client.gql<UserQuery, UserQueryVariables>({ query: USER_QUERY, variables: { id: 1 } });
-```
-
-You can also use [GraphQL Code Generator](https://the-guild.dev/graphql/codegen)'s `client` preset with `documentMode: "string"`. Both types are then inferred, and `variables` are type-checked against the document:
-
-```ts
-import { graphql } from "./gql";
-
-const UserQuery = graphql(`
+// 1. The graphql tag with type arguments (no codegen).
+const USER = graphql<UserQuery, UserQueryVariables>`
 	query User($id: ID!) {
 		user(id: $id) {
 			name
 		}
 	}
-`);
+`;
+await client.gql({ query: USER, variables: { id: "1" } }); // data and variables inferred and checked
 
-const { user } = await client.gql({ query: UserQuery, variables: { id: "1" } }); // fully typed
+// 2. Generics on a plain string.
+await client.gql<UserQuery, UserQueryVariables>({ query: USER_STRING, variables: { id: "1" } });
+
+// 3. GraphQL Code Generator: `client` preset with `documentMode: "string"`.
+import { graphql as codegen } from "./gql";
+await client.gql({ query: codegen(`query User($id: ID!) { user(id: $id) { name } }`), variables: { id: "1" } });
+```
+
+The `graphql` tag composes fragments and removes duplicated fragment definitions, so shared dependencies only appear once:
+
+```ts
+const USER_FIELDS = graphql`
+	fragment UserFields on User {
+		id
+		name
+	}
+`;
+const FRIENDS = graphql`
+	fragment Friends on User {
+		friends {
+			...UserFields
+		}
+	}
+	${USER_FIELDS}
+`;
+const USER = graphql`
+	query User {
+		me {
+			...UserFields
+			...Friends
+		}
+	}
+	${USER_FIELDS}
+	${FRIENDS}
+`;
 ```
 
 ## Caching
 
-Caching is enabled once a `cache` is configured.
+Caching is enabled once a `cache` is configured. Choose a strategy per call with `fetchPolicy`:
 
-| Operation  | Cached by default | Override       |
-| ---------- | ----------------- | -------------- |
-| `query`    | Yes               | `cache: false` |
-| `mutation` | No                | `cache: true`  |
+| Policy         | Reads cache | Network        | Writes cache | Default for |
+| -------------- | ----------- | -------------- | ------------ | ----------- |
+| `cache-first`  | Yes         | On a miss      | Yes          | queries     |
+| `network-only` | No          | Always         | Yes          |             |
+| `cache-only`   | Yes         | Never (throws) | No           |             |
+| `no-cache`     | No          | Always         | No           | mutations   |
 
 The cache key combines your `key`, the document, the `variables` (independent of key order) and the `operationName`. `key` is optional. Set it when you want to group entries for invalidation.
 
 ### Invalidation
 
 ```ts
-await client.gql({ query: UPDATE_USER, variables: { id: 1, name: "Morty" } });
-
 await client.invalidate(["user", 1]); // that user only
 await client.invalidate(["user"]); // every ["user", ...] entry
 await client.invalidate(); // everything this client cached
-```
 
-Mutations can invalidate cache entries declaratively. This only runs when the mutation succeeds:
-
-```ts
+// Declarative: runs only if the mutation succeeds.
 await client.gql({ query: UPDATE_USER, variables: { id: 1 }, invalidates: [["user", 1], ["users"]] });
 ```
 
+Any watched query (live query or React hook) under an invalidated prefix refetches automatically.
+
+### Optimistic updates
+
+`read` and `write` work on the same fields as a request. `write` updates every watcher of that entry immediately:
+
+```ts
+const target = { key: ["todos"], query: TODOS };
+const previous = await client.read(target);
+
+await client.write(target, { todos: [...previous.todos, draft] }); // instant UI
+
+try {
+	await client.gql({ query: ADD_TODO, variables: { draft }, invalidates: [["todos"]] }); // reconcile with the server
+} catch (error) {
+	await client.write(target, previous); // roll back
+}
+```
+
+### Persistent cache
+
+`StorageCache` persists results in `localStorage`, `sessionStorage` or any Storage-like object. That gives instant cache-first renders after a reload and offline reads:
+
+```ts
+import { StorageCache } from "@emiliodominguez/graphql-client";
+
+const client = new Client({ url, cache: new StorageCache({ prefix: "app:", ttl: 24 * 60 * 60_000 }) });
+```
+
+It is namespaced, honors the TTL and drops corrupted entries. If storage is full or unavailable it falls back to a cache miss rather than throwing.
+
 ### Custom cache adapters
 
-Implement the `Cache` interface. Every method can be sync or async:
+Implement `Cache`. Every method can be sync or async, so you can back it with IndexedDB, Redis or a KV store:
 
 ```ts
 import type { Cache } from "@emiliodominguez/graphql-client";
 
-const sessionCache: Cache = {
-	get(key) {
-		const raw = sessionStorage.getItem(key);
+const redisCache: Cache = {
+	async get(key) {
+		const raw = await redis.get(key);
 		return raw === null ? undefined : JSON.parse(raw);
 	},
-	set(key, value) {
-		sessionStorage.setItem(key, JSON.stringify(value));
+	async set(key, value) {
+		await redis.set(key, JSON.stringify(value), "EX", 60);
 	},
-	delete(key) {
-		sessionStorage.removeItem(key);
+	async delete(key) {
+		await redis.del(key);
 	},
-	clear() {
-		sessionStorage.clear();
+	async clear() {
+		await redis.flushdb();
 	},
-	keys() {
-		return Object.keys(sessionStorage);
+	async keys() {
+		return redis.keys("*");
 	},
 };
 ```
+
+## Live queries
+
+`client.watch()` returns an observable query that works with any framework:
+
+```ts
+const todos = client.watch({
+	key: ["todos"],
+	query: TODOS,
+	pollInterval: 30_000,
+	refetchOnFocus: true,
+	refetchOnReconnect: true,
+});
+
+const unsubscribe = todos.subscribe(function render({ data, error, loading }) {
+	// ...
+});
+
+await todos.refetch(); // never rejects; failures land in `error`
+```
+
+- **Lazy.** It fetches when the first listener subscribes and stops polling and listening when the last one leaves.
+- **Stale-while-revalidate.** `data` stays visible during refetches and after errors.
+- **Stays fresh.** It refetches on invalidation, polling, focus and reconnect. If it was invalidated while inactive, it catches up on the next subscribe.
+- **In sync.** Other fetches of the same entry, `write()` and `restore()` update it.
+- **Synchronous cache read.** With a sync cache, cached data is available immediately, with no loading flash.
+
+## React
+
+```tsx
+import { GraphQLProvider, useMutation, useQuery } from "@emiliodominguez/graphql-client/react";
+
+function App() {
+	return (
+		<GraphQLProvider client={client}>
+			<Todos />
+		</GraphQLProvider>
+	);
+}
+
+function Todos() {
+	const { data, loading, error, refetch } = useQuery({ key: ["todos"], query: TODOS, refetchOnFocus: true });
+	const [addTodo, { loading: saving }] = useMutation(ADD_TODO, { invalidates: [["todos"]] });
+
+	// `addTodo({ title })` → on success the list refetches and re-renders automatically
+}
+```
+
+| Hook                              | Purpose                                                                                                                 |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `useQuery(options)`               | Live query built on `client.watch()`. Supports `skip`. `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
+| `useSuspenseQuery(options)`       | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.             |
+| `useMutation(document, options?)` | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                       |
+| `useSubscription(options)`        | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                              |
+| `useClient()`                     | The client from context.                                                                                                |
+
+Components using the same entry share one request, and invalidations and `write()` re-render every consumer. React is an optional peer dependency (≥ 18).
+
+## SSR
+
+```ts
+// Server
+const client = new Client({ url, cache: new MemoryCache() });
+await client.gql({ key: ["todos"], query: TODOS }); // or render with your framework's data loading
+const snapshot = await client.extract();
+// embed JSON.stringify(snapshot) in the HTML (escape "<" when inlining in a <script>)
+
+// Browser
+const client = new Client({ url, cache: new MemoryCache() });
+await client.restore(window.__GRAPHQL_STATE__);
+```
+
+`useQuery` reads the restored cache synchronously, so the first render matches the server HTML without a loading state. To give each server request its own headers while sharing the cache, use `client.extend({ authToken })`.
 
 ## Auth and headers
 
@@ -143,15 +288,11 @@ const client = new Client({
 });
 
 await client.gql({ query, headers: { "X-Request-Id": crypto.randomUUID() } }); // per-call headers
+
+const userClient = client.extend({ authToken: session.token }); // derived client, shared cache
 ```
 
 Precedence from lowest to highest: defaults, `authToken`, client `headers`, call `headers`.
-
-`extend()` derives a client that shares the same cache, which is handy for per-request auth in SSR:
-
-```ts
-const userClient = client.extend({ authToken: session.token });
-```
 
 ## Retries
 
@@ -208,10 +349,33 @@ Calling `next()` with no argument forwards the current request. Returning a `Res
 const client = new Client({ url, method: "GET", persistedQueries: true });
 ```
 
-- `method: "GET"` sends queries as search params without `Content-Type`, so CORS stays simple and responses are cacheable by HTTP caches and CDNs. Mutations always use `POST`.
+- `method: "GET"` sends queries as search params without `Content-Type`, so CORS stays simple and responses are cacheable by HTTP caches and CDNs. Mutations and uploads always use `POST`.
 - `persistedQueries` implements [Automatic Persisted Queries](https://www.apollographql.com/docs/apollo-server/performance/apq). The client sends a SHA-256 hash first and the full document only when the server asks for it. If the server doesn't support APQ, the client turns it off and falls back. Pass `{ hash }` to use precomputed hashes.
+- `minify(document)` strips comments, insignificant whitespace and commas, and leaves strings untouched, so URLs are shorter and hashes stable.
 
-Together they produce short, stable URLs that a CDN can cache.
+## File uploads
+
+When the variables contain a `File` or `Blob`, at any depth or in lists, the request switches to the [GraphQL multipart request spec](https://github.com/jaydenseric/graphql-multipart-request-spec):
+
+```ts
+await client.gql({ query: UPLOAD_AVATAR, variables: { userId, avatar: input.files[0] } });
+```
+
+Apollo Server's CSRF prevention requires a non-simple header for multipart requests. Add one with `headers: { "Apollo-Require-Preflight": "true" }`.
+
+## Incremental delivery (`@defer` / `@stream`)
+
+Documents containing `@defer` or `@stream` automatically advertise `multipart/mixed`:
+
+```ts
+// Resolves once every deferred fragment has arrived, fully merged.
+const data = await client.gql({ query: PRODUCT_WITH_DEFERRED_REVIEWS });
+
+// Or render progressively: each value is the merged result so far (new references on every patch).
+for await (const partial of client.subscribe({ query: PRODUCT_WITH_DEFERRED_REVIEWS })) render(partial);
+```
+
+The client supports the current incremental format (`pending`/`id`/`subPath`/`completed`) and the 2022 format (`path`/`items`), delivered over `multipart/mixed` or SSE. If a deferred fragment fails, the client throws a `ClientError` that carries the partial data.
 
 ## Subscriptions (SSE)
 
@@ -252,14 +416,7 @@ try {
 }
 ```
 
-The client throws a `ClientError` when:
-
-- the response contains GraphQL `errors`;
-- the status is not 2xx (errors in the body are still parsed);
-- the body is not valid JSON;
-- `data` is missing.
-
-The library never writes to the console unless `debug: true` is set.
+The client throws a `ClientError` when the response contains GraphQL `errors`, when the status is not 2xx (errors in the body are still parsed), when the body is not valid JSON, or when `data` is missing. The library never writes to the console unless `debug: true` is set.
 
 ## API
 
@@ -270,56 +427,67 @@ The library never writes to the console unless `debug: true` is set.
 | `url`              | `string`                                         | (required)         | GraphQL endpoint.                               |
 | `authToken`        | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.        |
 | `headers`          | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                |
-| `cache`            | `Cache`                                          | none (no caching)  | Query result cache.                             |
+| `cache`            | `Cache`                                          | none (no caching)  | Result cache.                                   |
 | `fetch`            | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch for SSR, tests or instrumentation. |
 | `timeout`          | `number` (ms)                                    | none               | Default request timeout.                        |
 | `dedupe`           | `boolean`                                        | `true`             | Share in-flight identical queries.              |
-| `debug`            | `boolean`                                        | `false`            | Log operations, timings and cache hits.         |
 | `retry`            | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).          |
 | `middleware`       | `Middleware[]`                                   | `[]`               | Request/response middleware.                    |
 | `method`           | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                        |
 | `persistedQueries` | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                    |
+| `debug`            | `boolean`                                        | `false`            | Log operations, timings and cache hits.         |
 
-### `client.gql<TData, TVariables>(options): Promise<TData>`
+### Methods
+
+| Method                                 | Description                                                                                                                                   |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gql(options): Promise<TData>`         | Runs a query or mutation. Options below.                                                                                                      |
+| `watch(options): QueryRef`             | Live query: `getState()`, `subscribe(listener)`, `refetch()`. Takes `pollInterval`, `refetchOnFocus`, `refetchOnReconnect` and `initialData`. |
+| `subscribe(options)`                   | `AsyncGenerator` over SSE subscriptions or `@defer`/`@stream` results.                                                                        |
+| `invalidate(prefix?)`                  | Removes cached results under a key prefix and refetches watchers. Returns the number removed.                                                 |
+| `read(target)` / `write(target, data)` | Reads or writes a cache entry; `write` notifies watchers.                                                                                     |
+| `extract()` / `restore(snapshot)`      | Serializes the cache or hydrates it (SSR).                                                                                                    |
+| `extend(overrides): Client`            | Returns a derived client that shares the cache unless you override it.                                                                        |
+
+### `gql` / `watch` options
 
 | Option          | Type                                      | Description                                                       |
 | --------------- | ----------------------------------------- | ----------------------------------------------------------------- |
 | `query`         | `string \| TypedDocumentString`           | The GraphQL document.                                             |
-| `variables`     | `TVariables`                              | Operation variables.                                              |
+| `variables`     | `TVariables`                              | Operation variables (may contain files).                          |
 | `operationName` | `string`                                  | Selects the operation when the document has several.              |
 | `key`           | `(string \| number \| boolean \| null)[]` | Hierarchical cache key for grouping and invalidation.             |
-| `cache`         | `boolean`                                 | Per-call caching override.                                        |
+| `fetchPolicy`   | `FetchPolicy`                             | See [Caching](#caching).                                          |
+| `invalidates`   | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
 | `headers`       | `HeadersInit`                             | Per-call headers. Calls with these are not deduplicated.          |
 | `signal`        | `AbortSignal`                             | Per-call abort signal. Calls with one are not deduplicated.       |
 | `timeout`       | `number` (ms)                             | Per-call timeout, overrides the client default. Not deduplicated. |
 | `retry`         | `number \| RetryOptions \| false`         | Per-call retry policy. Calls with one are not deduplicated.       |
-| `invalidates`   | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
 
-### `client.invalidate(prefix?): Promise<number>`
+### Caches and helpers
 
-Removes cached results whose `key` starts with `prefix` and returns how many were removed.
+- `new MemoryCache({ ttl?, maxSize? })`: O(1) LRU. `ttl` defaults to 60 s and accepts `Infinity`. `maxSize` defaults to 100.
+- `new StorageCache({ storage?, prefix?, ttl? })`: Web Storage–backed. Defaults to `localStorage`, `"gql:"` and 24 h.
+- `graphql` tag, `minify(document)`, `dedupeFragments(document)`, `isClientError(error)`, `isRetryable(error, context)`.
 
-### `client.subscribe<TData, TVariables>(options): AsyncGenerator<TData>`
+## Size
 
-Takes `query`, `variables`, `operationName`, `headers` and `signal`. See [Subscriptions](#subscriptions-sse).
+Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
-### `client.extend(overrides): Client`
-
-Returns a new client with the overridden configuration, sharing the cache unless you override it.
-
-### `new MemoryCache({ ttl?, maxSize? })`
-
-An O(1) LRU cache. `ttl` defaults to `60_000` ms and accepts `Infinity`. `maxSize` defaults to `100`. It exposes `get`, `set`, `has`, `delete`, `clear`, `keys` and `size`.
+| Import                                  | Size    |
+| --------------------------------------- | ------- |
+| `Client` + `MemoryCache` (tree-shaken)  | ~6.1 kB |
+| `@emiliodominguez/graphql-client/react` | ~1.2 kB |
 
 ## Development
 
 ```bash
 yarn install
-yarn test          # unit + type tests
+yarn test          # unit, integration, React and type tests
 yarn coverage      # tests with coverage thresholds
 yarn typecheck
 yarn build         # ESM + CJS + .d.ts via tsup
-yarn size          # min / gzip / brotli bundle size
+yarn size          # bundle sizes + budget
 yarn demo          # builds and runs examples/rick-and-morty.js
 ```
 
