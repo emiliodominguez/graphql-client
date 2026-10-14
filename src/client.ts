@@ -1345,9 +1345,9 @@ export class Client {
 				if (!entry || index === -1) continue;
 
 				// The operation succeeded: its layer stays (committed) on top of real data requested before it started,
-				// until newer real data (which contains its effect) arrives. An invalidated entry drops it: the refetch
-				// brings the truth.
-				if (commit && !entry.stale) layer.committed = true;
+				// until newer real data (which contains its effect) arrives. Real data requested after it started may
+				// already contain the effect, and an invalidated entry refetches the truth: the layer goes.
+				if (commit && !entry.stale && entry.order <= layer.since) layer.committed = true;
 				else entry.layers.splice(index, 1);
 
 				// The entry stays registered until its rollback ran in the lane: stores queued meanwhile must keep
@@ -1526,6 +1526,9 @@ export class Client {
 		// Invalidated while a slow cache was writing (possibly after the invalidation listed the keys).
 		if (cache && this.#invalidatedSince(cacheKey, epoch)) {
 			await this.#drop(cacheKey);
+			// A live query may have read the value while it was in the cache (e.g. the invalidation failed to list the
+			// keys and is over): it refetches.
+			this.#retract(cacheKey, undefined, true, false);
 			return false;
 		}
 
@@ -1592,16 +1595,22 @@ export class Client {
 
 	/**
 	 * Reads a cache entry. Keys whose cleanup failed read as misses: the cache may still hold data the client meant
-	 * to remove (e.g. a rolled-back optimistic layer).
+	 * to remove (e.g. a rolled-back optimistic layer). So do keys an invalidation is deleting or deleted meanwhile.
 	 *
 	 * @template T - The value type
 	 * @param cacheKey - The serialized cache key
 	 * @returns The cached value
 	 */
 	async #read<T>(cacheKey: string): Promise<T | undefined> {
-		if (this.#shared.untrusted.has(cacheKey)) return undefined;
+		const since = registry.sequence;
 
-		return this.#configuration.cache?.get<T>(cacheKey);
+		// Data an invalidation in progress is about to delete is already outdated.
+		if (this.#shared.untrusted.has(cacheKey) || this.#isInvalidating(cacheKey)) return undefined;
+
+		const value = await this.#configuration.cache?.get<T>(cacheKey);
+
+		// An invalidation issued while reading may have deleted the key after the value was read.
+		return this.#invalidatedSince(cacheKey, since) ? undefined : value;
 	}
 
 	/**
