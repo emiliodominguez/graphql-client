@@ -521,3 +521,89 @@ describe("cache failures inside the request pipeline", function () {
 		expect(ref.getState().data).toEqual({ todos: 2 });
 	});
 });
+
+describe("shared results are immutable", function () {
+	const TODOS = "query Todos { todos { id title } }";
+
+	/**
+	 * Creates a client whose server always answers the same todo list.
+	 *
+	 * @returns The client and its fetch mock
+	 */
+	function todoClient(): { client: Client; fetchMock: ReturnType<typeof vi.fn<typeof fetch>> } {
+		const fetchMock = vi.fn<typeof fetch>(async function respond() {
+			return Response.json({
+				data: {
+					todos: [
+						{ id: 2, title: "b" },
+						{ id: 1, title: "a" },
+					],
+				},
+			});
+		});
+
+		return { client: new Client({ url: URL, cache: new MemoryCache(), fetch: fetchMock }), fetchMock };
+	}
+
+	it("a consumer mutating a result cannot corrupt the cache or other consumers", async function () {
+		const { client, fetchMock } = todoClient();
+		const [first, second] = await Promise.all([
+			client.gql<{ todos: Array<{ id: number; title: string }> }>({ key: ["todos"], query: TODOS }),
+			client.gql<{ todos: Array<{ id: number; title: string }> }>({ key: ["todos"], query: TODOS }),
+		]);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(function sortInPlace() {
+			first.todos.sort(function byId(a, b) {
+				return a.id - b.id;
+			});
+		}).toThrow(TypeError);
+		expect(function rename() {
+			first.todos[0]!.title = "hacked";
+		}).toThrow(TypeError);
+		expect(second.todos[0]).toEqual({ id: 2, title: "b" });
+		expect(await client.read({ key: ["todos"], query: TODOS })).toEqual({
+			todos: [
+				{ id: 2, title: "b" },
+				{ id: 1, title: "a" },
+			],
+		});
+	});
+
+	it("an optimistic update mutating its input is rejected without touching the real data", async function () {
+		const { client } = todoClient();
+		const target = { key: ["todos"], query: TODOS };
+
+		await client.gql(target);
+
+		const mutation = client.gql({
+			query: "mutation Add { add }",
+			optimistic: [
+				optimistic<{ todos: Array<{ id: number; title: string }> }, Record<string, unknown>>(
+					target,
+					function push(current) {
+						current!.todos.push({ id: 3, title: "c" });
+						return current!;
+					},
+				),
+			],
+		});
+
+		await expect(mutation).rejects.toThrow(TypeError);
+		expect(await client.read(target)).toEqual({
+			todos: [
+				{ id: 2, title: "b" },
+				{ id: 1, title: "a" },
+			],
+		});
+	});
+
+	it("data written with write() or restore() is frozen too", async function () {
+		const { client } = todoClient();
+		const written = { todos: [{ id: 9, title: "w" }] };
+
+		await client.write({ key: ["todos"], query: TODOS }, written);
+
+		expect(Object.isFrozen(written.todos[0])).toBe(true);
+	});
+});

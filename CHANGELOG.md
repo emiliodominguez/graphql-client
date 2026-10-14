@@ -96,6 +96,7 @@
 
 ### Changed
 
+- **Breaking:** results are deeply frozen (network results, `write()` / `restore()` data and optimistic renders). They are shared by the cache, deduplicated callers and live queries, so an in-place mutation used to corrupt all of them silently; it now throws. Optimistic updates and `fetchMore` merges must return new objects.
 - The package is published as `lumenql` (subpaths `lumenql/react` and `lumenql/ws`). Debug logs use the `[lumenql]` prefix.
 - Faster hot paths, about 1.5-1.8x on cache hits (`yarn bench`): documents are parsed once and memoized, file detection no longer deep-clones the variables, and cache keys embed a 64-bit hash of the document instead of its full text. Persisted cache entries written with the previous key format are simply misses.
 - The build targets ES2022. Internals use native `#private` fields: truly private at runtime, and minified for a smaller bundle. This requires Node 20+ and browsers from 2021 or later.

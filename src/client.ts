@@ -33,6 +33,7 @@ import type {
 import { containsFiles, createUploadBody } from "./upload";
 import {
 	createAbortScope,
+	deepFreeze,
 	createCacheKey,
 	matchesKeyPrefix,
 	parseOperation,
@@ -719,7 +720,9 @@ export class Client {
 
 				try {
 					// Raced against the signal: a stalled middleware, header resolver or body must not outlive the timeout.
-					data = await raceAbort(this.#send<TData>(query, options, context, scope.signal), scope.signal);
+					data = deepFreeze(
+						await raceAbort(this.#send<TData>(query, options, context, scope.signal), scope.signal),
+					);
 				} catch (error) {
 					if (scope.signal.aborted || !policy || attempt >= policy.attempts || !policy.retryIf(error, context)) {
 						this.#report(error, context, options.signal);
@@ -1161,6 +1164,8 @@ export class Client {
 	 */
 	async #store(cacheKey: string, data: unknown): Promise<void> {
 		const entry = this.#shared.layers.get(cacheKey);
+
+		deepFreeze(data);
 		const cache = this.#configuration.cache;
 		const epoch = sequence;
 
@@ -1197,7 +1202,7 @@ export class Client {
 		// An invalidated entry waits for real data: its watchers are already refetching.
 		if (entry.stale) return;
 
-		const visible = entry.layers.reduce(applyLayer, entry.base);
+		const visible = deepFreeze(entry.layers.reduce(applyLayer, entry.base));
 
 		if (visible === undefined) {
 			await this.#configuration.cache?.delete(cacheKey);

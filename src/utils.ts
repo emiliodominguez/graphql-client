@@ -142,11 +142,15 @@ function sortKeys(_key: string, value: unknown): unknown {
 
 	if (prototype !== Object.prototype && prototype !== null) return value;
 
-	// Null prototype: a `__proto__` key stays a regular property instead of replacing the prototype.
-	const sorted: Record<string, unknown> = Object.create(null);
+	const sorted: Record<string, unknown> = {};
 
 	for (const key of Object.keys(value).sort()) {
-		sorted[key] = (value as Record<string, unknown>)[key];
+		const item = (value as Record<string, unknown>)[key];
+
+		// A `__proto__` key must stay a regular property instead of replacing the prototype. Plain objects (not
+		// null-prototype ones, which V8 keeps in slow dictionary mode) keep this hot path fast.
+		if (key === "__proto__") Object.defineProperty(sorted, key, { value: item, enumerable: true });
+		else sorted[key] = item;
 	}
 
 	return sorted;
@@ -219,6 +223,25 @@ function isSameSegment(this: unknown[], segment: unknown, index: number): boolea
  */
 export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Promise<T> {
 	return typeof resolver === "function" ? (resolver as () => MaybePromise<T>)() : resolver;
+}
+
+/**
+ * Deeply freezes plain data, in place. Results are shared by the cache, deduplicated callers and every live query
+ * showing them: a consumer mutating one (e.g. `data.items.sort()`) would silently corrupt all the others.
+ * Typed arrays (which cannot be frozen) and already frozen objects are skipped.
+ *
+ * @template T - The value type
+ * @param value - Any value
+ * @returns The same value
+ */
+export function deepFreeze<T>(value: T): T {
+	if (value === null || typeof value !== "object" || Object.isFrozen(value) || ArrayBuffer.isView(value)) return value;
+
+	Object.freeze(value);
+
+	for (const key of Object.keys(value)) deepFreeze((value as Record<string, unknown>)[key]);
+
+	return value;
 }
 
 /**

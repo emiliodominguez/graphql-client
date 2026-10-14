@@ -146,6 +146,8 @@ Caching is enabled once a `cache` is configured. Choose a strategy per call with
 
 The cache key combines your `key`, the document, the `variables` (independent of key order) and the `operationName`. `key` is optional. Set it when you want to group entries for invalidation.
 
+Results are **deeply frozen**: the same objects are shared by the cache, deduplicated callers and every live query showing them, so mutating one (`data.items.sort()`) throws instead of silently corrupting the others. Copy before changing (`[...data.items].sort()`), and return new objects from optimistic updates and `fetchMore` merges.
+
 ### Invalidation
 
 ```ts
@@ -602,7 +604,7 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                 | Size    |
 | -------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken) | ~8.7 kB |
+| `Client` + `MemoryCache` (tree-shaken) | ~8.8 kB |
 | `lumenql/react`                        | ~1.7 kB |
 | `lumenql/ws`                           | ~1.6 kB |
 
