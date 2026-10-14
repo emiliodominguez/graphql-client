@@ -57,6 +57,14 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	}
 
 	/**
+	 * Ends the queue immediately, dropping buffered values (the consumer is no longer interested).
+	 */
+	discard(): void {
+		this.#values.length = 0;
+		this.end();
+	}
+
+	/**
 	 * Iterates buffered and future values.
 	 *
 	 * @yields Each value, in push order

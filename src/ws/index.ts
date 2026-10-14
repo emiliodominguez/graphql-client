@@ -164,7 +164,15 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 		if (socket || disposed || sinks.size === 0) return;
 
 		const Implementation = options.WebSocket ?? globalThis.WebSocket;
-		const current = new Implementation(url, PROTOCOL);
+		let current: WebSocket;
+
+		try {
+			current = new Implementation(url, PROTOCOL);
+		} catch (error) {
+			// An invalid URL or a blocked connection never succeeds on retry: fail every waiting subscription.
+			failAll(error);
+			return;
+		}
 
 		socket = current;
 		acknowledged = false;
@@ -173,22 +181,33 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 			try {
 				const payload = connectionParams === undefined ? undefined : await resolveValue(connectionParams);
 
+				// The socket was replaced, lazily closed or disposed while the params resolved.
+				if (socket !== current) return;
+
 				send(current, { type: "connection_init", payload });
 				schedule(function ackTimeout(): void {
 					if (!acknowledged) current.close(TERMINATED, "Connection acknowledgement timeout");
 				}, connectionAckTimeout);
 			} catch (error) {
-				failAll(error);
+				if (socket === current) failAll(error);
+
 				current.close(1000, "Invalid connection params");
 			}
 		};
 
 		current.onmessage = function handleMessage(event: MessageEvent): void {
-			let message: Message;
+			let message: Message | undefined;
+
+			// Late frames from a replaced or closed socket must not touch the current state.
+			if (socket !== current) return;
 
 			try {
 				message = JSON.parse(String(event.data)) as Message;
 			} catch {
+				// Handled below.
+			}
+
+			if (message === null || typeof message !== "object" || typeof message.type !== "string") {
 				current.close(4400, "Invalid message received");
 				return;
 			}
@@ -212,6 +231,9 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 
 		switch (message.type) {
 			case "connection_ack":
+				// A duplicate ack must not resubscribe running operations (servers close with 4409).
+				if (acknowledged) break;
+
 				acknowledged = true;
 				attempt = 0;
 				clearTimers();
@@ -238,7 +260,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 				// The server ended the operation: forget it first so no `complete` is echoed back.
 				sinks.delete(message.id!);
 
-				if (message.type === "error") sink.next({ errors: message.payload as GraphQLFormattedError[] });
+				if (message.type === "error") sink.next({ errors: toErrors(message.payload) });
 
 				sink.complete();
 				scheduleLazyClose();
@@ -333,7 +355,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 			 * Ends the stream when the consumer aborts.
 			 */
 			function abort(): void {
-				queue.end();
+				queue.discard();
 			}
 
 			sinks.set(id, {
@@ -385,4 +407,26 @@ function defaultRetryDelay(attempt: number): number {
 	const base = Math.min(1_000 * 2 ** (attempt - 1), 30_000);
 
 	return base / 2 + Math.random() * (base / 2);
+}
+
+/**
+ * Normalizes an `error` message payload, which hostile or buggy servers may send as a single object or an empty list.
+ *
+ * @param payload - The payload
+ * @returns At least one error
+ */
+function toErrors(payload: unknown): GraphQLFormattedError[] {
+	const errors = (Array.isArray(payload) ? payload : [payload]).filter(isErrorLike);
+
+	return errors.length > 0 ? errors : [{ message: "Subscription failed" }];
+}
+
+/**
+ * Checks whether a value can be reported as a GraphQL error.
+ *
+ * @param value - Any value
+ * @returns `true` for non-null objects
+ */
+function isErrorLike(value: unknown): value is GraphQLFormattedError {
+	return value !== null && typeof value === "object";
 }

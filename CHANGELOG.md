@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- WebSocket transport hardening against hostile servers and failing environments: a throwing `WebSocket` constructor fails the waiting subscriptions instead of leaving a ghost subscription (or hanging after a reconnect); late events from a replaced socket (including a late `connectionParams` rejection) no longer affect the current one; malformed frames (`null`, non-objects, missing `type`) close with 4400; a duplicate `connection_ack` no longer resubscribes running operations; `error` messages with an empty or non-array payload surface as a `ClientError`; aborting drops buffered results; `dispose()` leaves no pending timers.
 - Anonymous shorthand queries with a field named `subscription` or `mutation` after a nested selection were detected as that operation type (and routed as a subscription or never cached).
 - A rolled-back optimistic change no longer stays visible when the refetch meant to replace it fails, including for live queries that were inactive while the layer settled. Live queries get the real data (or none) pushed directly.
 - Found by a seeded model-based fuzzer (now part of the test suite):
