@@ -1,6 +1,6 @@
-![graphql-client: Your data. Precisely connected. A magenta and aluminum graph sculpture.](https://raw.githubusercontent.com/emiliodominguez/graphql-client/main/docs/assets/graphql-client-banner.jpg)
+![lumenql: Your data. Precisely connected. Amber light rays and optical geometry on warm ivory paper.](https://raw.githubusercontent.com/emiliodominguez/lumenql/main/docs/assets/lumenql-banner.jpg)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/emiliodominguez/graphql-client/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=161b22&logo=githubactions&logoColor=white)](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/emiliodominguez/lumenql/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=161b22&logo=githubactions&logoColor=white)](https://github.com/emiliodominguez/lumenql/actions/workflows/ci.yml)
 [![TypeScript: strict](https://img.shields.io/badge/TS-strict-3178c6?style=for-the-badge&labelColor=161b22&logo=typescript&logoColor=white)](./tsconfig.json)
 [![Runtime dependencies: 0](https://img.shields.io/badge/deps-0-2ea44f?style=for-the-badge&labelColor=161b22&logo=npm&logoColor=white)](./package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3da639?style=for-the-badge&labelColor=161b22&logo=opensourceinitiative&logoColor=white)](./LICENSE)
@@ -55,20 +55,24 @@ npm i lumenql
 import { Client, MemoryCache, graphql } from "lumenql";
 
 const client = new Client({
-	url: "https://rickandmortyapi.com/graphql",
-	cache: new MemoryCache({ ttl: 5 * 60_000, maxSize: 200 }),
-	timeout: 10_000,
+  url: "https://rickandmortyapi.com/graphql",
+  cache: new MemoryCache({ ttl: 5 * 60_000, maxSize: 200 }),
+  timeout: 10_000,
 });
 
 const CHARACTER = graphql<{ character: { name: string } }, { id: string }>`
-	query Character($id: ID!) {
-		character(id: $id) {
-			name
-		}
-	}
+  query Character($id: ID!) {
+    character(id: $id) {
+      name
+    }
+  }
 `;
 
-const { character } = await client.gql({ key: ["character", 1], query: CHARACTER, variables: { id: "1" } });
+const { character } = await client.gql({
+  key: ["character", 1],
+  query: CHARACTER,
+  variables: { id: "1" },
+});
 ```
 
 ## Typed documents
@@ -78,11 +82,11 @@ There are three ways to type a document, and you can mix them:
 ```ts
 // 1. The graphql tag with type arguments (no codegen).
 const USER = graphql<UserQuery, UserQueryVariables>`
-	query User($id: ID!) {
-		user(id: $id) {
-			name
-		}
-	}
+  query User($id: ID!) {
+    user(id: $id) {
+      name
+    }
+  }
 `;
 await client.gql({ query: USER, variables: { id: "1" } }); // data and variables inferred and checked
 
@@ -91,7 +95,10 @@ await client.gql<UserQuery, UserQueryVariables>({ query: USER_STRING, variables:
 
 // 3. GraphQL Code Generator: `client` preset with `documentMode: "string"`.
 import { graphql as codegen } from "./gql";
-await client.gql({ query: codegen(`query User($id: ID!) { user(id: $id) { name } }`), variables: { id: "1" } });
+await client.gql({
+  query: codegen(`query User($id: ID!) { user(id: $id) { name } }`),
+  variables: { id: "1" },
+});
 ```
 
 Required variables are enforced: if a typed document declares required variables, omitting `variables` is a compile error in `gql`, `watch`, `subscribe`, the hooks and `useMutation`'s `mutate`. Documents without variables, or with only optional ones, keep them optional.
@@ -100,28 +107,28 @@ The `graphql` tag composes fragments and removes duplicated fragment definitions
 
 ```ts
 const USER_FIELDS = graphql`
-	fragment UserFields on User {
-		id
-		name
-	}
+  fragment UserFields on User {
+    id
+    name
+  }
 `;
 const FRIENDS = graphql`
-	fragment Friends on User {
-		friends {
-			...UserFields
-		}
-	}
-	${USER_FIELDS}
+  fragment Friends on User {
+    friends {
+      ...UserFields
+    }
+  }
+  ${USER_FIELDS}
 `;
 const USER = graphql`
-	query User {
-		me {
-			...UserFields
-			...Friends
-		}
-	}
-	${USER_FIELDS}
-	${FRIENDS}
+  query User {
+    me {
+      ...UserFields
+      ...Friends
+    }
+  }
+  ${USER_FIELDS}
+  ${FRIENDS}
 `;
 ```
 
@@ -147,7 +154,11 @@ await client.invalidate(["user"]); // every ["user", ...] entry
 await client.invalidate(); // everything this client cached
 
 // Declarative: runs only if the mutation succeeds.
-await client.gql({ query: UPDATE_USER, variables: { id: 1 }, invalidates: [["user", 1], ["users"]] });
+await client.gql({
+  query: UPDATE_USER,
+  variables: { id: 1 },
+  invalidates: [["user", 1], ["users"]],
+});
 ```
 
 Any watched query (live query or React hook) under an invalidated prefix refetches automatically.
@@ -160,14 +171,14 @@ Pass `optimistic` updates to update the UI immediately. If the operation fails, 
 import { optimistic } from "lumenql";
 
 await client.gql({
-	query: ADD_TODO,
-	variables: { title },
-	optimistic: [
-		optimistic({ key: ["todos"], query: TODOS }, function addTodo(current) {
-			return { todos: [...(current?.todos ?? []), { id: "temp", title }] }; // typed from TODOS
-		}),
-	],
-	invalidates: [["todos"]], // then reconcile with the server
+  query: ADD_TODO,
+  variables: { title },
+  optimistic: [
+    optimistic({ key: ["todos"], query: TODOS }, function addTodo(current) {
+      return { todos: [...(current?.todos ?? []), { id: "temp", title }] }; // typed from TODOS
+    }),
+  ],
+  invalidates: [["todos"]], // then reconcile with the server
 });
 ```
 
@@ -183,7 +194,10 @@ await client.gql({
 ```ts
 import { StorageCache } from "lumenql";
 
-const client = new Client({ url, cache: new StorageCache({ prefix: "app:", ttl: 24 * 60 * 60_000 }) });
+const client = new Client({
+  url,
+  cache: new StorageCache({ prefix: "app:", ttl: 24 * 60 * 60_000 }),
+});
 ```
 
 It is namespaced (use distinct, non-nested prefixes: `app:` and `admin:`, not `gql:` and `gql:admin:`), honors the TTL and drops corrupted entries. If storage is full or unavailable it falls back to a cache miss rather than throwing.
@@ -196,22 +210,22 @@ Implement `Cache`. Every method can be sync or async, so you can back it with In
 import type { Cache } from "lumenql";
 
 const redisCache: Cache = {
-	async get(key) {
-		const raw = await redis.get(key);
-		return raw === null ? undefined : JSON.parse(raw);
-	},
-	async set(key, value) {
-		await redis.set(key, JSON.stringify(value), "EX", 60);
-	},
-	async delete(key) {
-		await redis.del(key);
-	},
-	async clear() {
-		await redis.flushdb();
-	},
-	async keys() {
-		return redis.keys("*");
-	},
+  async get(key) {
+    const raw = await redis.get(key);
+    return raw === null ? undefined : JSON.parse(raw);
+  },
+  async set(key, value) {
+    await redis.set(key, JSON.stringify(value), "EX", 60);
+  },
+  async delete(key) {
+    await redis.del(key);
+  },
+  async clear() {
+    await redis.flushdb();
+  },
+  async keys() {
+    return redis.keys("*");
+  },
 };
 ```
 
@@ -221,15 +235,15 @@ const redisCache: Cache = {
 
 ```ts
 const todos = client.watch({
-	key: ["todos"],
-	query: TODOS,
-	pollInterval: 30_000,
-	refetchOnFocus: true,
-	refetchOnReconnect: true,
+  key: ["todos"],
+  query: TODOS,
+  pollInterval: 30_000,
+  refetchOnFocus: true,
+  refetchOnReconnect: true,
 });
 
 const unsubscribe = todos.subscribe(function render({ data, error, loading }) {
-	// ...
+  // ...
 });
 
 await todos.refetch(); // never rejects; failures land in `error`
@@ -250,10 +264,10 @@ await todos.refetch(); // never rejects; failures land in `error`
 const feed = client.watch({ key: ["feed"], query: FEED, variables: { first: 20 } });
 
 await feed.fetchMore({
-	variables: { after: feed.getState().data?.feed.pageInfo.endCursor },
-	merge(previous, next) {
-		return { feed: { ...next.feed, edges: [...previous.feed.edges, ...next.feed.edges] } };
-	},
+  variables: { after: feed.getState().data?.feed.pageInfo.endCursor },
+  merge(previous, next) {
+    return { feed: { ...next.feed, edges: [...previous.feed.edges, ...next.feed.edges] } };
+  },
 });
 ```
 
@@ -272,13 +286,13 @@ await feed.fetchMore({
 ```ts
 // Vue: a composable in four lines
 export function useQuery(options) {
-	const state = shallowRef();
-	onScopeDispose(
-		client.watch(options).subscribe(function update(next) {
-			state.value = next;
-		}),
-	);
-	return state;
+  const state = shallowRef();
+  onScopeDispose(
+    client.watch(options).subscribe(function update(next) {
+      state.value = next;
+    }),
+  );
+  return state;
 }
 
 // Vue: keep the client out of reactive proxies (it uses native private fields): `markRaw(client)`
@@ -293,18 +307,22 @@ const todos = from(client.watch({ key: ["todos"], query: TODOS }));
 import { GraphQLProvider, useMutation, useQuery } from "lumenql/react";
 
 function App() {
-	return (
-		<GraphQLProvider client={client}>
-			<Todos />
-		</GraphQLProvider>
-	);
+  return (
+    <GraphQLProvider client={client}>
+      <Todos />
+    </GraphQLProvider>
+  );
 }
 
 function Todos() {
-	const { data, loading, error, refetch } = useQuery({ key: ["todos"], query: TODOS, refetchOnFocus: true });
-	const [addTodo, { loading: saving }] = useMutation(ADD_TODO, { invalidates: [["todos"]] });
+  const { data, loading, error, refetch } = useQuery({
+    key: ["todos"],
+    query: TODOS,
+    refetchOnFocus: true,
+  });
+  const [addTodo, { loading: saving }] = useMutation(ADD_TODO, { invalidates: [["todos"]] });
 
-	// `addTodo({ title })` → on success the list refetches and re-renders automatically
+  // `addTodo({ title })` → on success the list refetches and re-renders automatically
 }
 ```
 
@@ -341,11 +359,11 @@ await client.restore(window.__GRAPHQL_STATE__);
 
 ```ts
 const client = new Client({
-	url: "/graphql",
-	authToken: async function getToken() {
-		return (await auth.getSession())?.accessToken; // evaluated per request; nullish skips the header
-	},
-	headers: { "X-Client": "web" }, // any HeadersInit, or a (sync/async) function returning one
+  url: "/graphql",
+  authToken: async function getToken() {
+    return (await auth.getSession())?.accessToken; // evaluated per request; nullish skips the header
+  },
+  headers: { "X-Client": "web" }, // any HeadersInit, or a (sync/async) function returning one
 });
 
 await client.gql({ query, headers: { "X-Request-Id": crypto.randomUUID() } }); // per-call headers
@@ -369,13 +387,13 @@ By default, network failures and HTTP 408, 429 and 5xx are retried for **queries
 import { isClientError, isRetryable } from "lumenql";
 
 const client = new Client({
-	url,
-	retry: {
-		attempts: 5,
-		retryIf(error, context) {
-			return isRetryable(error, context) || (isClientError(error) && error.status === 401);
-		},
-	},
+  url,
+  retry: {
+    attempts: 5,
+    retryIf(error, context) {
+      return isRetryable(error, context) || (isClientError(error) && error.status === 401);
+    },
+  },
 });
 ```
 
@@ -387,16 +405,18 @@ Middleware wraps every request, retries included, using standard `Request` and `
 import type { Middleware } from "lumenql";
 
 const tracing: Middleware = async function tracing(request, next, context) {
-	const headers = new Headers(request.headers);
+  const headers = new Headers(request.headers);
 
-	headers.set("traceparent", createTraceparent());
+  headers.set("traceparent", createTraceparent());
 
-	const startedAt = performance.now();
-	const response = await next(new Request(request, { headers }));
+  const startedAt = performance.now();
+  const response = await next(new Request(request, { headers }));
 
-	metrics.timing(`graphql.${context.name}`, performance.now() - startedAt, { attempt: context.attempt });
+  metrics.timing(`graphql.${context.name}`, performance.now() - startedAt, {
+    attempt: context.attempt,
+  });
 
-	return response;
+  return response;
 };
 
 const client = new Client({ url, middleware: [tracing] });
@@ -434,7 +454,8 @@ Documents containing `@defer` or `@stream` automatically advertise `multipart/mi
 const data = await client.gql({ query: PRODUCT_WITH_DEFERRED_REVIEWS });
 
 // Or render progressively: each value is the merged result so far (new references on every patch).
-for await (const partial of client.subscribe({ query: PRODUCT_WITH_DEFERRED_REVIEWS })) render(partial);
+for await (const partial of client.subscribe({ query: PRODUCT_WITH_DEFERRED_REVIEWS }))
+  render(partial);
 ```
 
 The client supports the current incremental format (`pending`/`id`/`subPath`/`completed`) and the 2022 format (`path`/`items`), delivered over `multipart/mixed` or SSE. If a deferred fragment fails, the client throws a `ClientError` that carries the partial data.
@@ -443,7 +464,7 @@ The client supports the current incremental format (`pending`/`id`/`subPath`/`co
 
 ```ts
 for await (const { messageAdded } of client.subscribe({ query: ON_MESSAGE, variables: { room } })) {
-	render(messageAdded);
+  render(messageAdded);
 }
 ```
 
@@ -458,14 +479,14 @@ import { Client } from "lumenql";
 import { createWebSocketTransport } from "lumenql/ws";
 
 const client = new Client({
-	url: "https://api.example.com/graphql",
-	subscriptionTransport: createWebSocketTransport({
-		url: "wss://api.example.com/graphql",
-		connectionParams: async function getParams() {
-			return { authorization: `Bearer ${await getToken()}` }; // evaluated on every (re)connect
-		},
-		keepAlive: 15_000, // ping every 15s and reconnect if no pong arrives
-	}),
+  url: "https://api.example.com/graphql",
+  subscriptionTransport: createWebSocketTransport({
+    url: "wss://api.example.com/graphql",
+    connectionParams: async function getParams() {
+      return { authorization: `Bearer ${await getToken()}` }; // evaluated on every (re)connect
+    },
+    keepAlive: 15_000, // ping every 15s and reconnect if no pong arrives
+  }),
 });
 ```
 
@@ -492,16 +513,16 @@ Set `timeout: 0` to disable the client's default timeout for a single call. Non-
 import { isClientError } from "lumenql";
 
 try {
-	await client.gql({ query });
+  await client.gql({ query });
 } catch (error) {
-	if (isClientError(error)) {
-		error.status; // HTTP status
-		error.errors; // GraphQL errors ([] when the failure is HTTP-level)
-		error.data; // partial data, if the server sent any
-		error.response; // raw Response
-	} else {
-		// transport failure (offline, DNS, CORS) or abort/timeout
-	}
+  if (isClientError(error)) {
+    error.status; // HTTP status
+    error.errors; // GraphQL errors ([] when the failure is HTTP-level)
+    error.data; // partial data, if the server sent any
+    error.response; // raw Response
+  } else {
+    // transport failure (offline, DNS, CORS) or abort/timeout
+  }
 }
 ```
 
@@ -509,11 +530,11 @@ Use `onError` to handle failures in one place, such as reporting them or signing
 
 ```ts
 const client = new Client({
-	url,
-	onError(error, { type, name }) {
-		if (isClientError(error) && error.status === 401) auth.signOut();
-		reporter.capture(error, { operation: `${type} ${name}` });
-	},
+  url,
+  onError(error, { type, name }) {
+    if (isClientError(error) && error.status === 401) auth.signOut();
+    reporter.capture(error, { operation: `${type} ${name}` });
+  },
 });
 ```
 
