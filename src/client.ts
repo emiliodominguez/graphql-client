@@ -488,6 +488,9 @@ export class Client {
 				hasCache(): boolean {
 					return client.#configuration.cache !== undefined;
 				},
+				optimistic(): boolean {
+					return (client.#shared.layers.get(cacheKey)?.layers.length ?? 0) > 0;
+				},
 				epoch(): number {
 					return client.#epoch();
 				},
@@ -613,10 +616,8 @@ export class Client {
 		}
 
 		for (const [key, entry] of shared.layers) {
-			if (matchesKeyPrefix(key, prefix)) {
-				entry.stale = true;
-				entry.base = undefined;
-			}
+			// The last real data is kept for live queries to fall back on; it is never written back to the cache.
+			if (matchesKeyPrefix(key, prefix)) entry.stale = true;
 		}
 
 		shared.invalidations.push({ prefix, epoch });
@@ -1009,10 +1010,13 @@ export class Client {
 				// An invalidated base is unknown: never fold into it, the refetch brings the truth.
 				if (commit && !entry.stale) entry.base = applyLayer(entry.base, layer);
 
-				// Watchers may show this layer on top of data that never reached the cache (a no-cache or failed
-				// refetch): make them refetch, joining the refetch the invalidation started when still in flight.
+				if (entry.layers.length === 0) layers.delete(cacheKey);
+
+				// An invalidated entry is never rendered into the cache: show live queries the real data they fell
+				// back on (without this layer), then let them refetch, joining a refetch already in flight.
 				if (entry.stale) {
-					for (const watcher of [...(client.#shared.watchers.get(cacheKey) ?? [])]) watcher.invalidate();
+					client.#retract(cacheKey, entry.layers.reduce(applyLayer, entry.base), true);
+					continue;
 				}
 
 				if (entry.layers.length > 0) {
@@ -1020,13 +1024,13 @@ export class Client {
 					continue;
 				}
 
-				layers.delete(cacheKey);
-
-				// The last layer is gone: restore the real data, unless it was invalidated or expired meanwhile.
+				// The last layer is gone: restore the real data. If the entry expired meanwhile, only live queries get
+				// it back (they would otherwise keep showing the removed layer); nothing is written to the cache.
 				const cache = client.#configuration.cache;
 				const expired = cache !== undefined && (await cache.get(cacheKey)) === undefined;
 
-				if (!entry.stale && !expired) await client.#render(cacheKey, entry);
+				if (expired) client.#retract(cacheKey, entry.base, entry.base === undefined);
+				else await client.#render(cacheKey, entry);
 			}
 		}
 
@@ -1094,14 +1098,28 @@ export class Client {
 
 		if (visible === undefined) {
 			await this.#configuration.cache?.delete(cacheKey);
-
-			for (const watcher of [...(this.#shared.watchers.get(cacheKey) ?? [])]) watcher.invalidate();
+			this.#retract(cacheKey, undefined, true);
 
 			return;
 		}
 
 		await this.#configuration.cache?.set(cacheKey, visible);
 		this.#notify(cacheKey, visible);
+	}
+
+	/**
+	 * Replaces what live queries show for an entry without touching the cache, so a removed optimistic layer never
+	 * stays visible, even when the refetch meant to replace it fails.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param data - The data to show (`undefined` when no real data is known)
+	 * @param refetch - Whether the live queries should refetch
+	 */
+	#retract(cacheKey: string, data: unknown, refetch: boolean): void {
+		for (const watcher of [...(this.#shared.watchers.get(cacheKey) ?? [])]) {
+			watcher.replace(data);
+			if (refetch) watcher.invalidate();
+		}
 	}
 
 	/**

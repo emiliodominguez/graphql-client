@@ -380,3 +380,111 @@ describe("B6: no-cache live query under a pending optimistic layer", function ()
 		await drain(held);
 	});
 });
+
+describe("rolled-back layers never survive a failed refetch", function () {
+	const TODOS = "query Todos { todos }";
+	const ADD = "mutation Add($title: String!) { add(title: $title) }";
+	const TARGET = { key: ["todos"], query: TODOS };
+
+	/**
+	 * Server whose mutations wait for `reject()` and are then rejected; queries fail once `failQueries` is set.
+	 *
+	 * @returns The fetch mock and its controls
+	 */
+	function server() {
+		const controls = { failQueries: false, reject: function noop(): void {} };
+		const fetchMock = vi.fn<typeof fetch>(async function (input) {
+			const { query } = await (input as Request).clone().json();
+
+			if (query.startsWith("mutation")) {
+				await new Promise<void>(function (resolve) {
+					controls.reject = resolve;
+				});
+
+				return Response.json({ errors: [{ message: "rejected" }] });
+			}
+
+			return controls.failQueries
+				? Response.json({ errors: [{ message: "query failed" }] })
+				: Response.json({ data: { todos: ["a"] } });
+		});
+
+		return { fetchMock, controls };
+	}
+
+	/**
+	 * Appends a todo optimistically.
+	 *
+	 * @param title - The todo title
+	 * @returns The optimistic update
+	 */
+	function append(title: string) {
+		return optimistic(TARGET, function (current: { todos: string[] } | undefined) {
+			return { todos: [...(current?.todos ?? []), title] };
+		});
+	}
+
+	/**
+	 * Lets pending promises and 0ms timers run.
+	 */
+	async function settle(): Promise<void> {
+		for (let index = 0; index < 3; index++) {
+			await new Promise(function (resolve) {
+				setTimeout(resolve, 0);
+			});
+		}
+	}
+
+	it("an active live query drops the rolled-back data when its refetch fails", async function () {
+		const { fetchMock, controls } = server();
+		const client = new Client({ url: "https://test.dev/graphql", fetch: fetchMock, cache: new MemoryCache() });
+		const mutation = client
+			.gql({ query: ADD, variables: { title: "boom" }, optimistic: [append("boom")] })
+			.catch(function () {});
+
+		await settle();
+
+		const ref = client.watch(TARGET);
+		const stop = ref.subscribe(function () {});
+
+		expect(ref.getState().data).toEqual({ todos: ["boom"] });
+
+		controls.failQueries = true;
+		controls.reject();
+		await mutation;
+		await settle();
+
+		expect(ref.getState().data).toBeUndefined();
+		expect(ref.getState().error).toBeDefined();
+		stop();
+	});
+
+	it("an inactive live query created during a pending layer drops it once the layer settled", async function () {
+		const { fetchMock, controls } = server();
+		const client = new Client({ url: "https://test.dev/graphql", fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const mutation = client
+			.gql({ query: ADD, variables: { title: "boom" }, optimistic: [append("boom")] })
+			.catch(function () {});
+
+		await settle();
+
+		const ref = client.watch(TARGET);
+
+		expect(ref.getState().data).toEqual({ todos: ["a", "boom"] });
+
+		controls.reject();
+		await mutation;
+		await client.invalidate(["todos"]);
+		controls.failQueries = true;
+
+		const stop = ref.subscribe(function () {});
+
+		await settle();
+
+		expect(JSON.stringify(ref.getState().data ?? null)).not.toContain("boom");
+		stop();
+	});
+});

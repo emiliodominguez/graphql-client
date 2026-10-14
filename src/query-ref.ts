@@ -19,6 +19,8 @@ export interface QueryWatcher<TData> {
 	invalidate(): void;
 	/** The data currently held by the watcher */
 	current(): TData | undefined;
+	/** Replaces the shown data, even with `undefined` (e.g. when an optimistic layer it showed was removed) */
+	replace(data: TData | undefined): void;
 }
 
 /**
@@ -36,6 +38,8 @@ export interface QueryHost<TData, TVariables> {
 	cached(): TData | undefined;
 	/** Whether a cache is configured (so a missing entry means it was invalidated or expired) */
 	hasCache(): boolean;
+	/** Whether the entry currently has pending optimistic layers */
+	optimistic(): boolean;
 	/** Current invalidation epoch */
 	epoch(): number;
 	/** Whether this query's entry was invalidated after `epoch` */
@@ -106,6 +110,12 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	#freshAsOf: number;
 
 	/**
+	 * Whether the shown data includes pending optimistic layers. Checked on activation: layers settled while this ref
+	 * was inactive (and so not notified) must not stay visible.
+	 */
+	#optimistic: boolean;
+
+	/**
 	 * Whether a fetch ever succeeded (after which `initialData` no longer counts as fresh).
 	 */
 	#fetched = false;
@@ -140,6 +150,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		this.#state = { data, error: undefined, loading: data === undefined };
 		this.#freshAsOf = host.epoch();
+		this.#optimistic = data !== undefined && host.optimistic();
 		this.getState = this.getState.bind(this);
 		this.subscribe = this.subscribe.bind(this);
 		this.refetch = this.refetch.bind(this);
@@ -239,6 +250,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.
 			if (this.#options.fetchPolicy !== "no-cache") await this.#host.write(merged);
 
+			this.#optimistic = this.#host.optimistic();
 			this.#setState({ data: this.#host.overlay(merged), error: undefined, loading: false });
 		} catch (error) {
 			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
@@ -282,10 +294,15 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			this.#host.register({
 				receive(data: TData): void {
 					ref.#fetched = true;
+					ref.#optimistic = ref.#host.optimistic();
 					ref.#setState({ data, error: undefined, loading: ref.#state.loading });
 				},
 				current(): TData | undefined {
 					return ref.#state.data;
+				},
+				replace(data: TData | undefined): void {
+					ref.#optimistic = ref.#host.optimistic();
+					ref.#setState({ data, error: ref.#state.error, loading: ref.#state.loading });
 				},
 				invalidate(): void {
 					ref.#stale = true;
@@ -296,6 +313,12 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		// Catch up with anything that happened while inactive: newer cached data, invalidation or expiry.
 		const cached = this.#host.peek();
+
+		// Optimistic data shown before going inactive was never confirmed: once its layers settled, drop it.
+		if (this.#optimistic && !this.#host.optimistic()) {
+			this.#optimistic = false;
+			this.#setState({ data: cached, error: this.#state.error, loading: this.#state.loading });
+		}
 
 		if (cached !== undefined) this.#setState({ data: cached, error: this.#state.error, loading: this.#state.loading });
 
@@ -397,6 +420,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 			if (version === this.#version) {
 				this.#fetched = true;
+				this.#optimistic = this.#host.optimistic();
 				this.#setState({ data, error: undefined, loading: false });
 			}
 		} catch (error) {

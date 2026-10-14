@@ -4,6 +4,7 @@
 
 ### Added
 
+- A seeded model-based fuzzer (`src/fuzz.test.ts`) for the cache, live queries and optimistic layers. It runs as a deterministic CI gate; use `FUZZ_SEEDS`/`FUZZ_OPS` for longer local runs.
 - The `cache-and-network` fetch policy (stale-while-revalidate). It answers from the cache, refreshes in the background, and updates live queries.
 - Type-level required variables. Omitting the `variables` a typed document requires is a compile error in `gql`, `watch`, `subscribe`, the hooks and `mutate`. `WithVariables` and `RequiredKeys` are exported.
 - `useLazyQuery`: an on-demand query that stays live once executed.
@@ -39,6 +40,7 @@
 
 ### Fixed
 
+- A rolled-back optimistic change no longer stays visible when the refetch meant to replace it fails, including for live queries that were inactive while the layer settled. Live queries get the real data (or none) pushed directly.
 - Found by a seeded model-based fuzzer (now part of the test suite):
     - An invalidation issued through another client sharing the cache (`extend()`) no longer lets live queries join a stale in-flight request.
     - Live queries never show a response the cache rejected as superseded, since they read back the cache entry.
