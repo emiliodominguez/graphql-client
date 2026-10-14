@@ -1,4 +1,4 @@
-import type { FetchPolicy, QueryState, WatchOptions } from "./types";
+import type { FetchMoreOptions, FetchPolicy, QueryState, WatchOptions } from "./types";
 
 /**
  * Listener notified on every state change.
@@ -23,8 +23,9 @@ export interface QueryWatcher<TData> {
  * Bridge between a {@link QueryRef} and its client.
  *
  * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
  */
-export interface QueryHost<TData> {
+export interface QueryHost<TData, TVariables> {
 	/** Executes the query with the given policy */
 	fetch(fetchPolicy: FetchPolicy): Promise<TData>;
 	/** Reads the cache synchronously when the cache allows it */
@@ -33,6 +34,10 @@ export interface QueryHost<TData> {
 	hasCache(): boolean;
 	/** Starts receiving cache events; returns the unregister function */
 	register(watcher: QueryWatcher<TData>): () => void;
+	/** Fetches the same document with extra variables, bypassing the cache */
+	fetchMore(variables: Partial<TVariables>): Promise<TData>;
+	/** Stores data for this query's entry and notifies every watcher of it */
+	write(data: TData): Promise<void>;
 }
 
 /**
@@ -42,10 +47,12 @@ export interface QueryHost<TData> {
  * - Keeps showing the previous data while refetching (stale-while-revalidate).
  * - Refetches automatically when its cache key is invalidated, on an interval, on window focus and on reconnect.
  * - Stays in sync with any other fetch or `client.write()` targeting the same key.
+ * - Implements the Svelte store contract: `subscribe` emits the current state immediately, so `$query` just works.
  *
  * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
  */
-export class QueryRef<TData> {
+export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	/**
 	 * Current state. Replaced (never mutated) on change, so it can back `useSyncExternalStore`.
 	 */
@@ -76,7 +83,7 @@ export class QueryRef<TData> {
 	 * @param options - Watch options
 	 */
 	constructor(
-		private readonly host: QueryHost<TData>,
+		private readonly host: QueryHost<TData, TVariables>,
 		private readonly options: Pick<
 			WatchOptions<TData, unknown>,
 			"fetchPolicy" | "pollInterval" | "refetchOnFocus" | "refetchOnReconnect" | "initialData"
@@ -88,6 +95,7 @@ export class QueryRef<TData> {
 		this.getState = this.getState.bind(this);
 		this.subscribe = this.subscribe.bind(this);
 		this.refetch = this.refetch.bind(this);
+		this.fetchMore = this.fetchMore.bind(this);
 	}
 
 	/**
@@ -100,13 +108,15 @@ export class QueryRef<TData> {
 	}
 
 	/**
-	 * Subscribes to state changes. The first subscriber activates the query.
+	 * Subscribes to state changes. The listener is called immediately with the current state, then on every
+	 * change (Svelte store contract). The first subscriber activates the query.
 	 *
-	 * @param listener - Called on every state change
+	 * @param listener - Called with the current state and on every state change
 	 * @returns The unsubscribe function
 	 */
 	subscribe(listener: QueryListener<TData>): () => void {
 		this.listeners.add(listener);
+		listener(this.state);
 
 		if (this.listeners.size === 1) this.activate();
 
@@ -120,6 +130,37 @@ export class QueryRef<TData> {
 	 */
 	async refetch(): Promise<QueryState<TData>> {
 		return this.fetch("network-only");
+	}
+
+	/**
+	 * Fetches another page (or any variable variation) and merges it into the current data. The merged result is
+	 * written to this query's cache entry, so every consumer of it updates. Never rejects: failures land in `error`.
+	 *
+	 * @example
+	 * await feed.fetchMore({
+	 *   variables: { after: feed.getState().data?.posts.pageInfo.endCursor },
+	 *   merge(previous, next) {
+	 *     return { posts: { ...next.posts, edges: [...previous.posts.edges, ...next.posts.edges] } };
+	 *   },
+	 * });
+	 *
+	 * @param options - Variables to override and how to merge the result
+	 * @returns The resulting state
+	 */
+	async fetchMore(options: FetchMoreOptions<TData, TVariables>): Promise<QueryState<TData>> {
+		this.setState({ data: this.state.data, error: undefined, loading: true });
+
+		try {
+			const next = await this.host.fetchMore(options.variables);
+			const merged = this.state.data === undefined ? next : options.merge(this.state.data, next);
+
+			await this.host.write(merged);
+			this.setState({ data: merged, error: undefined, loading: false });
+		} catch (error) {
+			this.setState({ data: this.state.data, error, loading: false });
+		}
+
+		return this.state;
 	}
 
 	/**

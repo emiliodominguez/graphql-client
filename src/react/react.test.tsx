@@ -240,6 +240,49 @@ describe("useQuery", function () {
 		expect(screen.getByTestId("todos").textContent).toBe("optimistic");
 	});
 
+	it("exposes fetchMore for pagination", async function () {
+		const { wrapper } = setup();
+
+		/**
+		 * Paginated list with a load-more button.
+		 *
+		 * @returns The element
+		 */
+		function Paged() {
+			const { data, fetchMore } = useQuery<{ todos: string[] }>({ key: ["paged"], query: TODOS });
+
+			/**
+			 * Appends the next page.
+			 */
+			function loadMore(): void {
+				void fetchMore({
+					variables: {},
+					merge(previous, next) {
+						return { todos: [...previous.todos, ...next.todos] };
+					},
+				});
+			}
+
+			return (
+				<div>
+					<span data-testid="paged">{data?.todos.join(",") ?? "-"}</span>
+					<button onClick={loadMore}>more</button>
+				</div>
+			);
+		}
+
+		render(<Paged />, { wrapper });
+		await waitFor(function () {
+			expect(screen.getByTestId("paged").textContent).toBe("a");
+		});
+
+		fireEvent.click(screen.getByText("more"));
+
+		await waitFor(function () {
+			expect(screen.getByTestId("paged").textContent).toBe("a,a");
+		});
+	});
+
 	it("skips without fetching", function () {
 		const { wrapper, fetchMock } = setup();
 

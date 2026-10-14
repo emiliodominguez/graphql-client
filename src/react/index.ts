@@ -13,7 +13,14 @@ import {
 } from "react";
 import type { Client } from "../client";
 import type { QueryRef } from "../query-ref";
-import type { QueryState, RequestOptions, SubscribeOptions, TypedDocumentString, WatchOptions } from "../types";
+import type {
+	FetchMoreOptions,
+	QueryState,
+	RequestOptions,
+	SubscribeOptions,
+	TypedDocumentString,
+	WatchOptions,
+} from "../types";
 import { stableStringify } from "../utils";
 
 /**
@@ -70,18 +77,25 @@ export interface UseQueryOptions<TData, TVariables> extends WatchOptions<TData, 
  * Result of {@link useQuery}.
  *
  * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
  */
-export interface UseQueryResult<TData> extends QueryState<TData> {
+export interface UseQueryResult<TData, TVariables = Record<string, unknown>> extends QueryState<TData> {
 	/** Refetches from the network, keeping current data visible. Never rejects. */
 	refetch(): Promise<QueryState<TData>>;
+	/** Fetches another page and merges it into the data (pagination). Never rejects. */
+	fetchMore(options: FetchMoreOptions<TData, TVariables>): Promise<QueryState<TData>>;
 }
 
 /**
  * Result of {@link useSuspenseQuery}: `data` is always defined.
  *
  * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
  */
-export interface UseSuspenseQueryResult<TData> extends UseQueryResult<TData> {
+export interface UseSuspenseQueryResult<TData, TVariables = Record<string, unknown>> extends UseQueryResult<
+	TData,
+	TVariables
+> {
 	/** The query data */
 	data: TData;
 }
@@ -173,7 +187,7 @@ export function useClient(): Client {
  */
 export function useQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
 	options: UseQueryOptions<TData, TVariables>,
-): UseQueryResult<TData> {
+): UseQueryResult<TData, TVariables> {
 	const ref = useQueryRef(options);
 	const skip = options.skip === true;
 	const state = useSyncExternalStore<QueryState<TData>>(
@@ -183,8 +197,8 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
 	);
 
 	return useMemo(
-		function createResult(): UseQueryResult<TData> {
-			return { ...state, refetch: ref.refetch };
+		function createResult(): UseQueryResult<TData, TVariables> {
+			return { ...state, refetch: ref.refetch, fetchMore: ref.fetchMore };
 		},
 		[state, ref],
 	);
@@ -201,7 +215,7 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
  */
 export function useSuspenseQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
 	options: Omit<UseQueryOptions<TData, TVariables>, "skip">,
-): UseSuspenseQueryResult<TData> {
+): UseSuspenseQueryResult<TData, TVariables> {
 	const client = useClient();
 	const identity = getIdentity(options);
 	const requests = getSuspenseRequests(client);
@@ -227,7 +241,7 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 		throw (entry ?? startSuspenseRequest(requests, identity, client.gql<TData, TVariables>(options))).promise;
 	}
 
-	return { ...state, data: state.data, refetch: ref.refetch };
+	return { ...state, data: state.data, refetch: ref.refetch, fetchMore: ref.fetchMore };
 }
 
 /**
@@ -372,12 +386,14 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
  * @param options - The query and watch options
  * @returns The query ref
  */
-function useQueryRef<TData, TVariables extends object>(options: UseQueryOptions<TData, TVariables>): QueryRef<TData> {
+function useQueryRef<TData, TVariables extends object>(
+	options: UseQueryOptions<TData, TVariables>,
+): QueryRef<TData, TVariables> {
 	const client = useClient();
 	const identity = getIdentity(options);
 
 	return useMemo(
-		function createQueryRef(): QueryRef<TData> {
+		function createQueryRef(): QueryRef<TData, TVariables> {
 			return client.watch<TData, TVariables>(options);
 		},
 		// `identity` captures every option that defines the query.

@@ -228,6 +228,50 @@ await todos.refetch(); // never rejects; failures land in `error`
 - **Stays fresh.** It refetches on invalidation, polling, focus and reconnect. If it was invalidated while inactive, it catches up on the next subscribe.
 - **In sync.** Other fetches of the same entry, `write()` and `restore()` update it.
 - **Synchronous cache read.** With a sync cache, cached data is available immediately, with no loading flash.
+- **Store contract.** `subscribe` emits the current state immediately, so a `QueryRef` _is_ a Svelte store.
+
+### Pagination
+
+`fetchMore` fetches the same document with extra variables and merges the page into the data. It writes the merged result to the query's cache entry, so every component reading that entry updates:
+
+```ts
+const feed = client.watch({ key: ["feed"], query: FEED, variables: { first: 20 } });
+
+await feed.fetchMore({
+	variables: { after: feed.getState().data?.feed.pageInfo.endCursor },
+	merge(previous, next) {
+		return { feed: { ...next.feed, edges: [...previous.feed.edges, ...next.feed.edges] } };
+	},
+});
+```
+
+`useQuery` and `useSuspenseQuery` return the same `fetchMore`.
+
+### Other frameworks
+
+```svelte
+<script>
+	const todos = client.watch({ key: ["todos"], query: TODOS }); // a Svelte store as-is
+</script>
+
+{#if $todos.loading}Loading…{:else}{$todos.data.todos.length} todos{/if}
+```
+
+```ts
+// Vue: a composable in four lines
+export function useQuery(options) {
+	const state = shallowRef();
+	onScopeDispose(
+		client.watch(options).subscribe(function update(next) {
+			state.value = next;
+		}),
+	);
+	return state;
+}
+
+// Solid
+const todos = from(client.watch({ key: ["todos"], query: TODOS }));
+```
 
 ## React
 
@@ -250,13 +294,13 @@ function Todos() {
 }
 ```
 
-| Hook                              | Purpose                                                                                                                 |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `useQuery(options)`               | Live query built on `client.watch()`. Supports `skip`. `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
-| `useSuspenseQuery(options)`       | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.             |
-| `useMutation(document, options?)` | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                       |
-| `useSubscription(options)`        | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                              |
-| `useClient()`                     | The client from context.                                                                                                |
+| Hook                              | Purpose                                                                                                                                                    |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useQuery(options)`               | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, supports `skip`. `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
+| `useSuspenseQuery(options)`       | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                |
+| `useMutation(document, options?)` | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                          |
+| `useSubscription(options)`        | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                 |
+| `useClient()`                     | The client from context.                                                                                                                                   |
 
 Components using the same entry share one request, and invalidations and `write()` re-render every consumer. React is an optional peer dependency (≥ 18).
 
@@ -467,15 +511,15 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 ### Methods
 
-| Method                                 | Description                                                                                                                                   |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gql(options): Promise<TData>`         | Runs a query or mutation. Options below.                                                                                                      |
-| `watch(options): QueryRef`             | Live query: `getState()`, `subscribe(listener)`, `refetch()`. Takes `pollInterval`, `refetchOnFocus`, `refetchOnReconnect` and `initialData`. |
-| `subscribe(options)`                   | `AsyncGenerator` over SSE subscriptions or `@defer`/`@stream` results.                                                                        |
-| `invalidate(prefix?)`                  | Removes cached results under a key prefix and refetches watchers. Returns the number removed.                                                 |
-| `read(target)` / `write(target, data)` | Reads or writes a cache entry; `write` notifies watchers.                                                                                     |
-| `extract()` / `restore(snapshot)`      | Serializes the cache or hydrates it (SSR).                                                                                                    |
-| `extend(overrides): Client`            | Returns a derived client that shares the cache unless you override it.                                                                        |
+| Method                                 | Description                                                                                                                                                  |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gql(options): Promise<TData>`         | Runs a query or mutation. Options below.                                                                                                                     |
+| `watch(options): QueryRef`             | Live query: `getState()`, `subscribe(listener)`, `refetch()`, `fetchMore()`. Takes `pollInterval`, `refetchOnFocus`, `refetchOnReconnect` and `initialData`. |
+| `subscribe(options)`                   | `AsyncGenerator` over SSE subscriptions or `@defer`/`@stream` results.                                                                                       |
+| `invalidate(prefix?)`                  | Removes cached results under a key prefix and refetches watchers. Returns the number removed.                                                                |
+| `read(target)` / `write(target, data)` | Reads or writes a cache entry; `write` notifies watchers.                                                                                                    |
+| `extract()` / `restore(snapshot)`      | Serializes the cache or hydrates it (SSR).                                                                                                                   |
+| `extend(overrides): Client`            | Returns a derived client that shares the cache unless you override it.                                                                                       |
 
 ### `gql` / `watch` options
 
@@ -512,6 +556,7 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 ```bash
 yarn install
+yarn verify        # everything CI runs: format, typecheck, coverage, build, size, exports
 yarn test          # unit, integration, React and type tests
 yarn coverage      # tests with coverage thresholds
 yarn typecheck

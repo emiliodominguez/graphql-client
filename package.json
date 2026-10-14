@@ -37,7 +37,11 @@
 		"file-upload",
 		"websocket",
 		"graphql-ws",
-		"subscriptions-transport"
+		"subscriptions-transport",
+		"svelte",
+		"vue",
+		"solid",
+		"pagination"
 	],
 	"author": "Emilio Dominguez",
 	"license": "MIT",
@@ -118,8 +122,9 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"size": "node scripts/size.js",
-		"prepublishOnly": "yarn typecheck && yarn test && yarn build",
-		"check:exports": "attw --pack ."
+		"prepublishOnly": "yarn verify",
+		"check:exports": "attw --pack .",
+		"verify": "yarn format:check && yarn typecheck && yarn coverage && yarn build && yarn size && yarn check:exports"
 	},
 	"peerDependencies": {
 		"react": ">=18"

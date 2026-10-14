@@ -319,3 +319,22 @@ export type CacheTarget<TData, TVariables> = Pick<
 	RequestOptions<TData, TVariables>,
 	"query" | "variables" | "operationName" | "key"
 >;
+
+/**
+ * Options for {@link QueryRef.fetchMore}.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ */
+export interface FetchMoreOptions<TData, TVariables> {
+	/** Variables merged over the query's own (e.g. the next cursor or offset) */
+	variables: Partial<TVariables>;
+	/**
+	 * Combines the current data with the newly fetched page.
+	 *
+	 * @param previous - The current data
+	 * @param next - The fetched page
+	 * @returns The merged data
+	 */
+	merge(previous: TData, next: TData): TData;
+}

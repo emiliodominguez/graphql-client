@@ -4,6 +4,9 @@
 
 ### Added
 
+- Pagination with `fetchMore` on `QueryRef`, `useQuery` and `useSuspenseQuery`. It merges pages and writes the result to the cache entry.
+- `QueryRef` follows the Svelte store contract, and the README has recipes for Svelte, Vue and Solid.
+- `yarn verify` runs the full CI sequence locally. It is also used by `prepublishOnly`.
 - WebSocket transport (`@emiliodominguez/graphql-client/ws`), a zero-dependency implementation of `graphql-transport-ws`. It shares one socket across subscriptions, connects and closes lazily, takes async `connectionParams`, and supports ack timeout, ping/pong keep-alive, and reconnect with resubscribe.
 - A pluggable `subscriptionTransport` option and the `SubscriptionTransport` interface.
 - A release workflow that publishes to npm with provenance on each GitHub release.

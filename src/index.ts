@@ -11,6 +11,7 @@ export type {
 	CacheKey,
 	CacheTarget,
 	ClientConfiguration,
+	FetchMoreOptions,
 	FetchPolicy,
 	GraphQLFormattedError,
 	GraphQLResponse,

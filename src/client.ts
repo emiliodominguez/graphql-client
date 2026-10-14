@@ -288,7 +288,7 @@ export class Client {
 	 */
 	watch<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		options: WatchOptions<TData, TVariables>,
-	): QueryRef<TData> {
+	): QueryRef<TData, TVariables> {
 		const client = this;
 		const query = String(options.query);
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
@@ -297,7 +297,7 @@ export class Client {
 			options.fetchPolicy === "cache-first" ||
 			options.fetchPolicy === "cache-only";
 
-		return new QueryRef<TData>(
+		return new QueryRef<TData, TVariables>(
 			{
 				fetch(fetchPolicy: FetchPolicy): Promise<TData> {
 					return client.gql<TData, TVariables>({ ...options, fetchPolicy });
@@ -312,6 +312,17 @@ export class Client {
 				},
 				register(watcher: QueryWatcher<TData>): () => void {
 					return client.register(cacheKey, watcher as QueryWatcher<unknown>);
+				},
+				fetchMore(variables: Partial<TVariables>): Promise<TData> {
+					return client.gql<TData, TVariables>({
+						...options,
+						variables: { ...options.variables, ...variables } as TVariables,
+						fetchPolicy: "no-cache",
+						invalidates: undefined,
+					});
+				},
+				write(data: TData): Promise<void> {
+					return client.write<TData, TVariables>(options, data);
 				},
 			},
 			options,

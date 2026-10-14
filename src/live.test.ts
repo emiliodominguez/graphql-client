@@ -468,3 +468,92 @@ describe("watch", function () {
 		}).not.toThrow();
 	});
 });
+
+describe("store contract", function () {
+	it("emits the current state synchronously on subscribe (Svelte store contract)", function () {
+		const ref = createClient(counter()).watch({ query: TODOS });
+		const received: QueryState<unknown>[] = [];
+		const unsubscribe = ref.subscribe(function (state) {
+			received.push(state);
+		});
+
+		expect(received[0]).toBe(ref.getState());
+		unsubscribe();
+	});
+});
+
+describe("fetchMore", function () {
+	const FEED = "query Feed($after: Int) { feed(after: $after) }";
+
+	/**
+	 * Paginated server: each page has two items starting after the cursor.
+	 *
+	 * @returns The fetch mock
+	 */
+	function pages() {
+		return vi.fn<typeof fetch>(async function (input) {
+			const { variables } = await (input as Request).clone().json();
+			const start = variables?.after ?? 0;
+
+			if (start >= 4) return Response.json({ errors: [{ message: "no more pages" }] });
+
+			return Response.json({ data: { feed: [start + 1, start + 2] } });
+		});
+	}
+
+	/**
+	 * Concatenates pages.
+	 *
+	 * @param previous - Current data
+	 * @param next - New page
+	 * @returns Merged data
+	 */
+	function concat(previous: { feed: number[] }, next: { feed: number[] }): { feed: number[] } {
+		return { feed: [...previous.feed, ...next.feed] };
+	}
+
+	it("merges pages into the data and the cache entry, syncing every watcher", async function () {
+		const fetchMock = pages();
+		const client = createClient(fetchMock);
+		const options = { key: ["feed"], query: FEED, variables: { after: 0 } };
+		const ref = client.watch<{ feed: number[] }, { after: number }>(options);
+		const twin = client.watch<{ feed: number[] }, { after: number }>(options);
+		const stop = [ref.subscribe(function () {}), twin.subscribe(function () {})];
+
+		await flush();
+
+		const state = await ref.fetchMore({ variables: { after: 2 }, merge: concat });
+
+		expect(state).toEqual({ data: { feed: [1, 2, 3, 4] }, error: undefined, loading: false });
+		expect(twin.getState().data).toEqual({ feed: [1, 2, 3, 4] });
+		expect(await client.read(options)).toEqual({ feed: [1, 2, 3, 4] });
+		expect(await (fetchMock.mock.calls[1]![0] as Request).json()).toMatchObject({ variables: { after: 2 } });
+
+		for (const unsubscribe of stop) unsubscribe();
+	});
+
+	it("keeps the data and exposes the error when a page fails", async function () {
+		const ref = createClient(pages()).watch<{ feed: number[] }, { after: number }>({
+			query: FEED,
+			variables: { after: 2 },
+		});
+		const unsubscribe = ref.subscribe(function () {});
+
+		await flush();
+
+		const state = await ref.fetchMore({ variables: { after: 4 }, merge: concat });
+
+		expect(state.data).toEqual({ feed: [3, 4] });
+		expect(state.error).toMatchObject({ message: "no more pages" });
+		expect(state.loading).toBe(false);
+		unsubscribe();
+	});
+
+	it("uses the fetched page as-is when there is no data yet", async function () {
+		const ref = new Client({ url: URL, fetch: pages() }).watch<{ feed: number[] }, { after: number }>({ query: FEED });
+		const merge = vi.fn(concat);
+
+		expect((await ref.fetchMore({ variables: { after: 2 }, merge })).data).toEqual({ feed: [3, 4] });
+		expect(merge).not.toHaveBeenCalled();
+	});
+});
