@@ -594,6 +594,7 @@ yarn coverage      # tests with coverage thresholds
 yarn typecheck
 yarn build         # ESM + CJS + .d.ts via tsup
 yarn size          # bundle sizes + budget
+yarn bench         # hot-path micro-benchmarks (cache hits, live queries, reads)
 yarn check:exports # validates package exports/types for every resolution mode
 FUZZ_SEEDS=20000 yarn test src/fuzz.test.ts   # longer model-based fuzzing run (CI runs 1,000 seeds)
 yarn demo          # builds and runs examples/rick-and-morty.js

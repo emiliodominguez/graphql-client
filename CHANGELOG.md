@@ -84,9 +84,11 @@
 - Requests carrying files are never cached or deduplicated, since different files previously shared a key.
 - A failed persisted-query hash is retried instead of being memoized.
 - Subscribing the same listener twice no longer activates a query twice.
+- Variables with an own `__proto__` key are no longer dropped from cache keys (they collided with the same variables without it) or from multipart upload payloads.
 
 ### Changed
 
+- Faster hot paths, about 1.5-1.8x on cache hits (`yarn bench`): documents are parsed once and memoized, file detection no longer deep-clones the variables, and cache keys embed a 64-bit hash of the document instead of its full text. Persisted cache entries written with the previous key format are simply misses.
 - The build targets ES2022. Internals use native `#private` fields: truly private at runtime, and minified for a smaller bundle. This requires Node 20+ and browsers from 2021 or later.
 - `SubscriptionRequest.query` is optional and `extensions` was added. Strict persisted queries send only `extensions.persistedQuery`.
 - Clients that share a cache (for example via `extend()`) now also share live-query notifications and last-request-wins ordering.

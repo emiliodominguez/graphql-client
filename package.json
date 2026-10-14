@@ -124,7 +124,8 @@
 		"size": "node scripts/size.js",
 		"prepublishOnly": "yarn verify",
 		"check:exports": "attw --pack .",
-		"verify": "yarn format:check && yarn typecheck && yarn coverage && yarn build && yarn size && yarn check:exports"
+		"verify": "yarn format:check && yarn typecheck && yarn coverage && yarn build && yarn size && yarn check:exports",
+		"bench": "esbuild bench/gql.bench.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/bench.mjs && node node_modules/.cache/bench.mjs"
 	},
 	"peerDependencies": {
 		"react": ">=18"

@@ -28,7 +28,7 @@ import type {
 	WatchOptions,
 	WithVariables,
 } from "./types";
-import { createUploadBody, extractFiles } from "./upload";
+import { containsFiles, createUploadBody } from "./upload";
 import {
 	createAbortScope,
 	createCacheKey,
@@ -205,7 +205,7 @@ export class Client {
 		const isQuery = operation.type === "query";
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
 		// Files have no stable identity in a cache key: never cache nor dedupe requests that carry them.
-		const hasFiles = extractFiles(options.variables).files.size > 0;
+		const hasFiles = containsFiles(options.variables);
 		const fetchPolicy = hasFiles ? "no-cache" : (options.fetchPolicy ?? (isQuery ? "cache-first" : "no-cache"));
 		const readsCache =
 			fetchPolicy === "cache-first" || fetchPolicy === "cache-only" || fetchPolicy === "cache-and-network";

@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { Client } from "./client";
-import { createUploadBody, extractFiles } from "./upload";
+import { containsFiles, createUploadBody, extractFiles } from "./upload";
 
 describe("extractFiles", function () {
 	it("replaces files with null and records every path", function () {
 		const avatar = new File(["a"], "avatar.png");
 		const doc = new Blob(["b"]);
-		const { clone, files } = extractFiles({ input: { avatar, docs: [doc, avatar] }, date: new Date(0), n: 1 });
+		const files = new Map<Blob, string[]>();
+		const clone = extractFiles({ input: { avatar, docs: [doc, avatar] }, date: new Date(0), n: 1 }, files);
 
 		expect(clone).toEqual({ input: { avatar: null, docs: [null, null] }, date: new Date(0), n: 1 });
 		expect([...files]).toEqual([
@@ -16,7 +17,10 @@ describe("extractFiles", function () {
 	});
 
 	it("returns nothing for file-less values", function () {
-		expect(extractFiles({ a: [1, "x"] }).files.size).toBe(0);
+		const files = new Map<Blob, string[]>();
+
+		expect(extractFiles({ a: [1, "x"] }, files)).toEqual({ a: [1, "x"] });
+		expect(files.size).toBe(0);
 		expect(createUploadBody({ variables: { a: 1 } })).toBeUndefined();
 		expect(createUploadBody({})).toBeUndefined();
 	});
@@ -49,5 +53,40 @@ describe("uploads", function () {
 		const form = createUploadBody({ variables: { file: new Blob(["x"]) } })!;
 
 		expect((form.get("0") as File).name).toBe("blob");
+	});
+});
+
+describe("containsFiles", function () {
+	it("finds files exactly where extractFiles does", function () {
+		const file = new Blob(["x"]);
+		const values: unknown[] = [
+			undefined,
+			null,
+			file,
+			{ a: [{ b: file }] },
+			[1, [2, [file]]],
+			{ a: 1, b: [2, { c: "d" }] },
+			new Map([["file", file]]),
+			Object.assign(Object.create({ inherited: file }) as object, { own: 1 }),
+		];
+
+		for (const value of values) {
+			const files = new Map<Blob, string[]>();
+
+			extractFiles(value, files);
+			expect(containsFiles(value)).toBe(files.size > 0);
+		}
+	});
+});
+
+describe("createUploadBody", function () {
+	it("keeps a __proto__ variable as a regular key", function () {
+		const variables = JSON.parse('{"__proto__":{"note":"kept"}}') as Record<string, unknown>;
+
+		variables.file = new Blob(["x"]);
+
+		const operations = JSON.parse(String(createUploadBody({ variables })!.get("operations")));
+
+		expect(operations.variables).toEqual(JSON.parse('{"__proto__":{"note":"kept"},"file":null}'));
 	});
 });

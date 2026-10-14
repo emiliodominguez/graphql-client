@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createAbortScope,
 	createCacheKey,
+	hashDocument,
 	matchesKeyPrefix,
 	parseOperation,
 	resolveValue,
@@ -48,6 +49,25 @@ describe("parseOperation", function () {
 	});
 });
 
+describe("hashDocument", function () {
+	it("is deterministic and sensitive to every character", function () {
+		const hash = hashDocument("query A { a }");
+
+		expect(hash).toMatch(/^[0-9a-z]+\.[0-9a-z]+$/);
+		expect(hashDocument("query A { a }")).toBe(hash);
+		expect(hashDocument("query A { b }")).not.toBe(hash);
+		expect(hashDocument("query A { a } ")).not.toBe(hash);
+	});
+
+	it("has no collisions across many similar documents", function () {
+		const hashes = new Set<string>();
+
+		for (let index = 0; index < 20_000; index++) hashes.add(hashDocument(`query Q${index} { field(id: ${index}) }`));
+
+		expect(hashes.size).toBe(20_000);
+	});
+});
+
 describe("stableStringify", function () {
 	it("is independent of object key order, recursively", function () {
 		expect(stableStringify({ b: 1, a: { d: [{ y: 1, x: 2 }], c: 2 } })).toBe(
@@ -61,6 +81,55 @@ describe("stableStringify", function () {
 
 	it("does not reorder non-plain objects", function () {
 		expect(stableStringify(new Date(0))).toBe('"1970-01-01T00:00:00.000Z"');
+	});
+
+	it("follows JSON.stringify semantics for every value kind", function () {
+		class Point {
+			y = 2;
+			x = 1;
+		}
+
+		const value = {
+			z: [1, "two", null, undefined, Number.NaN, -0, Infinity, { b: true, a: false }, function () {}],
+			date: new Date(0),
+			nested: {
+				toJSON: function (key: string) {
+					return { key, d: 4, c: 3 };
+				},
+			},
+			point: new Point(),
+			boxed: [new String("s"), new Number(1), new Boolean(false)],
+			escaped: { 'quote"key': "line\nbreak", "\u2028": "\u0000" },
+			skipped: undefined,
+			symbol: Symbol("x"),
+			"10": 10,
+			"9": 9,
+		};
+
+		expect(stableStringify(value)).toBe(
+			'{"9":9,"10":10,"boxed":["s",1,false],"date":"1970-01-01T00:00:00.000Z","escaped":' +
+				JSON.stringify({ 'quote"key': "line\nbreak", "\u2028": "\u0000" }) +
+				',"nested":{"c":3,"d":4,"key":"nested"},"point":{"y":2,"x":1},' +
+				'"z":[1,"two",null,null,null,0,null,{"a":false,"b":true},null]}',
+		);
+		expect(stableStringify(undefined)).toBeUndefined();
+	});
+
+	it("keeps __proto__ as a regular key", function () {
+		expect(stableStringify(JSON.parse('{"b":1,"__proto__":{"x":1}}'))).toBe('{"__proto__":{"x":1},"b":1}');
+	});
+
+	it("throws on circular structures and BigInt", function () {
+		const circular: Record<string, unknown> = {};
+
+		circular.self = circular;
+
+		expect(function () {
+			stableStringify(circular);
+		}).toThrow();
+		expect(function () {
+			stableStringify({ big: BigInt(1) });
+		}).toThrow(TypeError);
 	});
 });
 

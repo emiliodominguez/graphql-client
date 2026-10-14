@@ -33,26 +33,91 @@ const IGNORED_TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*
 const OPERATION_DEFINITION = /(?:^|\})\s*(query|mutation|subscription)\b\s*([_A-Za-z][_0-9A-Za-z]*)?/g;
 
 /**
+ * Memoized facts about a document.
+ */
+interface DocumentInfo {
+	/** Operations defined by the document, in order (an anonymous `query` when none is found) */
+	operations: OperationInfo[];
+	/** See {@link hashDocument} */
+	hash: string;
+}
+
+/**
+ * Recently seen documents. Bounded: documents are usually static, but generated ones must not leak memory.
+ */
+const documents = new Map<string, DocumentInfo>();
+
+/**
+ * Parses and hashes a document once, then serves it from the memo.
+ *
+ * @param document - The GraphQL document
+ * @returns The document facts
+ */
+function inspectDocument(document: string): DocumentInfo {
+	let info = documents.get(document);
+
+	if (info === undefined) {
+		const operations: OperationInfo[] = [];
+		let h1 = 0xdeadbeef;
+		let h2 = 0x41c6ce57;
+
+		for (const match of document.replace(IGNORED_TOKENS, " ").trim().matchAll(OPERATION_DEFINITION)) {
+			operations.push({ type: match[1] as OperationType, name: match[2] });
+		}
+
+		if (operations.length === 0) operations.push({ type: "query" });
+
+		// Two independent multiply-xor lanes: 64 bits keep collisions negligible for any realistic document count.
+		for (let index = 0; index < document.length; index++) {
+			const code = document.charCodeAt(index);
+
+			h1 = Math.imul(h1 ^ code, 2654435761);
+			h2 = Math.imul(h2 ^ code, 1597334677);
+		}
+
+		if (documents.size >= 500) documents.clear();
+
+		info = { operations, hash: (h1 >>> 0).toString(36) + "." + (h2 >>> 0).toString(36) };
+		documents.set(document, info);
+	}
+
+	return info;
+}
+
+/**
  * Detects the operation type and name of a GraphQL document without a full parser.
  * Anonymous shorthand documents (`{ ... }`) resolve to `query`.
  *
  * @param document - The GraphQL document
  * @param operationName - Operation to select when the document defines several
- * @returns The detected operation info
+ * @returns The detected operation info (shared: never mutate it)
  */
 export function parseOperation(document: string, operationName?: string): OperationInfo {
-	const source = document.replace(IGNORED_TOKENS, " ").trim();
-	let first: OperationInfo | undefined;
+	const { operations } = inspectDocument(document);
 
-	for (const match of source.matchAll(OPERATION_DEFINITION)) {
-		const info: OperationInfo = { type: match[1] as OperationType, name: match[2] };
+	return (operationName && operations.find(hasName, operationName)) || operations[0]!;
+}
 
-		if (!operationName || info.name === operationName) return info;
+/**
+ * Computes a non-cryptographic 64-bit hash of a document. Cache keys embed it instead of the full text, so building,
+ * hashing and storing keys no longer scales with document size.
+ *
+ * @param document - The GraphQL document
+ * @returns Two base-36 numbers joined by a dot
+ */
+export function hashDocument(document: string): string {
+	return inspectDocument(document).hash;
+}
 
-		first ??= info;
-	}
-
-	return first ?? { type: "query" };
+/**
+ * `Array.prototype.find` callback matching the operation named `this`.
+ *
+ * @param this - The operation name
+ * @param info - A parsed operation
+ * @returns `true` when the names match
+ */
+function hasName(this: string, info: OperationInfo): boolean {
+	return info.name === this;
 }
 
 /**
@@ -63,33 +128,24 @@ export function parseOperation(document: string, operationName?: string): Operat
  * @returns The value, with plain objects rebuilt using sorted keys
  */
 function sortKeys(_key: string, value: unknown): unknown {
-	if (!isPlainObject(value)) return value;
+	if (value === null || typeof value !== "object") return value;
 
-	const sorted: Record<string, unknown> = {};
+	const prototype = Object.getPrototypeOf(value);
+
+	if (prototype !== Object.prototype && prototype !== null) return value;
+
+	// Null prototype: a `__proto__` key stays a regular property instead of replacing the prototype.
+	const sorted: Record<string, unknown> = Object.create(null);
 
 	for (const key of Object.keys(value).sort()) {
-		sorted[key] = value[key];
+		sorted[key] = (value as Record<string, unknown>)[key];
 	}
 
 	return sorted;
 }
 
 /**
- * Checks whether a value is a plain object literal.
- *
- * @param value - Any value
- * @returns `true` for `{}` / `Object.create(null)` objects
- */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-	if (value === null || typeof value !== "object") return false;
-
-	const prototype = Object.getPrototypeOf(value);
-
-	return prototype === Object.prototype || prototype === null;
-}
-
-/**
- * Deterministic `JSON.stringify`: object key order does not affect the output.
+ * Deterministic `JSON.stringify`: plain-object key order does not affect the output.
  *
  * @param value - Any JSON-serializable value
  * @returns The serialized value
@@ -102,13 +158,13 @@ export function stableStringify(value: unknown): string {
  * Builds the serialized cache key for a request.
  *
  * @param key - The user-defined hierarchical key
- * @param query - The GraphQL document
+ * @param query - The GraphQL document (embedded as its {@link hashDocument} hash)
  * @param variables - The operation variables
  * @param operationName - The selected operation name
  * @returns A deterministic string key
  */
 export function createCacheKey(key: CacheKey, query: string, variables?: unknown, operationName?: string): string {
-	return stableStringify([key, query, variables ?? null, operationName ?? null]);
+	return stableStringify([key, hashDocument(query), variables ?? null, operationName ?? null]);
 }
 
 /**

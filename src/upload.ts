@@ -1,14 +1,4 @@
 /**
- * Result of {@link extractFiles}.
- */
-export interface ExtractedFiles {
-	/** The input with every file replaced by `null` */
-	clone: unknown;
-	/** Each file mapped to every object path it appeared at */
-	files: Map<Blob, string[]>;
-}
-
-/**
  * Checks whether a value is a file-like `Blob` (including `File`).
  *
  * @param value - Any value
@@ -19,40 +9,58 @@ function isFile(value: unknown): value is Blob {
 }
 
 /**
+ * Checks whether a value is an object literal, the only objects (besides arrays) scanned for files.
+ *
+ * @param value - Any value
+ * @returns `true` for objects whose prototype is `Object.prototype`
+ */
+function isObjectLiteral(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/**
  * Recursively replaces files with `null` and records their paths, per the GraphQL multipart request spec.
- * Only plain objects and arrays are traversed.
+ * Only object literals and arrays are traversed.
  *
  * @param value - The value to scan (usually the operation variables)
+ * @param files - Accumulator of each file mapped to every object path it appeared at
  * @param path - The object path of `value`
- * @param files - Accumulator of files to paths
- * @returns The clone and the extracted files
+ * @returns A clone of `value` with every file replaced by `null`
  */
-export function extractFiles(value: unknown, path = "variables", files = new Map<Blob, string[]>()): ExtractedFiles {
+export function extractFiles(value: unknown, files: Map<Blob, string[]>, path = "variables"): unknown {
 	if (isFile(value)) {
 		files.set(value, [...(files.get(value) ?? []), path]);
 
-		return { clone: null, files };
+		return null;
 	}
 
 	if (Array.isArray(value)) {
-		const clone = value.map(function extractItem(item: unknown, index: number): unknown {
-			return extractFiles(item, `${path}.${index}`, files).clone;
+		return value.map(function extractItem(item: unknown, index: number): unknown {
+			return extractFiles(item, files, `${path}.${index}`);
 		});
-
-		return { clone, files };
 	}
 
-	if (value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-		const clone: Record<string, unknown> = {};
+	if (!isObjectLiteral(value)) return value;
 
-		for (const [key, item] of Object.entries(value)) {
-			clone[key] = extractFiles(item, `${path}.${key}`, files).clone;
-		}
+	// Null prototype: a `__proto__` key stays a regular property.
+	const clone: Record<string, unknown> = Object.create(null);
 
-		return { clone, files };
-	}
+	for (const key of Object.keys(value)) clone[key] = extractFiles(value[key], files, `${path}.${key}`);
 
-	return { clone: value, files };
+	return clone;
+}
+
+/**
+ * Checks whether a value contains a file anywhere {@link extractFiles} would find one, without cloning it.
+ *
+ * @param value - The value to scan (usually the operation variables)
+ * @returns `true` when at least one file is present
+ */
+export function containsFiles(value: unknown): boolean {
+	return (
+		isFile(value) ||
+		(Array.isArray(value) ? value : isObjectLiteral(value) ? Object.values(value) : []).some(containsFiles)
+	);
 }
 
 /**
@@ -63,7 +71,8 @@ export function extractFiles(value: unknown, path = "variables", files = new Map
  * @returns The FormData body, or `undefined` when there are no files
  */
 export function createUploadBody(payload: { variables?: unknown }): FormData | undefined {
-	const { clone, files } = extractFiles(payload.variables);
+	const files = new Map<Blob, string[]>();
+	const clone = extractFiles(payload.variables, files);
 
 	if (files.size === 0) return undefined;
 
