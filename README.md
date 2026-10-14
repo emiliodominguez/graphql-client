@@ -94,6 +94,8 @@ import { graphql as codegen } from "./gql";
 await client.gql({ query: codegen(`query User($id: ID!) { user(id: $id) { name } }`), variables: { id: "1" } });
 ```
 
+Required variables are enforced: if a typed document declares required variables, omitting `variables` is a compile error in `gql`, `watch`, `subscribe`, the hooks and `useMutation`'s `mutate`. Documents without variables, or with only optional ones, keep them optional.
+
 The `graphql` tag composes fragments and removes duplicated fragment definitions, so shared dependencies only appear once:
 
 ```ts
@@ -303,13 +305,14 @@ function Todos() {
 }
 ```
 
-| Hook                              | Purpose                                                                                                                                                                                                                      |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `useQuery(options)`               | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, and supports `skip` and `keepPreviousData` (no empty flash when variables change). `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
-| `useSuspenseQuery(options)`       | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                                                                                  |
-| `useMutation(document, options?)` | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                                                                                            |
-| `useSubscription(options)`        | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                                                                                   |
-| `useClient()`                     | The client from context.                                                                                                                                                                                                     |
+| Hook                               | Purpose                                                                                                                                                                                                                      |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useQuery(options)`                | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, and supports `skip` and `keepPreviousData` (no empty flash when variables change). `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
+| `useSuspenseQuery(options)`        | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                                                                                  |
+| `useLazyQuery(document, options?)` | Returns `[execute, state]`. Nothing is fetched until `execute(variables)` runs, and from then on the result is live like `useQuery`. Supports `keepPreviousData`.                                                            |
+| `useMutation(document, options?)`  | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                                                                                            |
+| `useSubscription(options)`         | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                                                                                   |
+| `useClient()`                      | The client from context.                                                                                                                                                                                                     |
 
 Components using the same entry share one request, and invalidations and `write()` re-render every consumer. React is an optional peer dependency (≥ 18).
 
@@ -406,6 +409,7 @@ const client = new Client({ url, method: "GET", persistedQueries: true });
 
 - `method: "GET"` sends queries as search params without `Content-Type`, so CORS stays simple and responses are cacheable by HTTP caches and CDNs. Mutations and uploads always use `POST`.
 - `persistedQueries` implements [Automatic Persisted Queries](https://www.apollographql.com/docs/apollo-server/performance/apq). The client sends a SHA-256 hash first and the full document only when the server asks for it. If the server doesn't support APQ, the client turns it off and falls back. Pass `{ hash }` to use precomputed hashes.
+- `persistedQueries: { strict: true, hash }` enables trusted documents. The client only ever sends the hash and never the document text, and an unknown hash is an error instead of a fallback. Use it with servers that only execute an allow-list of registered operations, and pair it with a `hash` that looks up your build-time manifest.
 - `minify(document)` strips comments, insignificant whitespace and commas, and leaves strings untouched, so URLs are shorter and hashes stable.
 
 ## File uploads

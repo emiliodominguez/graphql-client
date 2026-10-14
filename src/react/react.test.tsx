@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryCache } from "../cache/memory-cache";
 import { Client } from "../client";
 import type { ClientConfiguration, SubscriptionTransport } from "../types";
-import { GraphQLProvider, useClient, useMutation, useQuery, useSubscription, useSuspenseQuery } from "./index";
+import { GraphQLProvider, useClient, useLazyQuery, useMutation, useQuery, useSubscription, useSuspenseQuery } from "./index";
 
 const URL = "https://test.dev/graphql";
 const TODOS = "query Todos { todos }";
@@ -694,5 +694,60 @@ describe("keepPreviousData", function () {
 		await waitFor(function () {
 			expect(screen.getByTestId("page").textContent).toBe("2:false");
 		});
+	});
+});
+
+describe("useLazyQuery", function () {
+	it("fetches on demand, resolves with data and stays live", async function () {
+		const { wrapper, fetchMock, client } = setup();
+		let result!: string[] | undefined;
+
+		/**
+		 * Lazy list with a load button.
+		 *
+		 * @returns The element
+		 */
+		function Lazy() {
+			const [load, { data, called, loading }] = useLazyQuery<{ todos: string[] }>(TODOS, { key: ["todos"] });
+
+			/**
+			 * Executes the query and records its result.
+			 */
+			async function handleLoad(): Promise<void> {
+				result = (await load()).todos;
+			}
+
+			return (
+				<div>
+					<span data-testid="lazy">{`${called}:${loading}:${data?.todos.join(",") ?? "-"}`}</span>
+					<button
+						onClick={function () {
+							void handleLoad();
+						}}
+					>
+						load
+					</button>
+				</div>
+			);
+		}
+
+		render(<Lazy />, { wrapper });
+
+		expect(screen.getByTestId("lazy").textContent).toBe("false:false:-");
+		expect(fetchMock).not.toHaveBeenCalled();
+
+		fireEvent.click(screen.getByText("load"));
+
+		await waitFor(function () {
+			expect(screen.getByTestId("lazy").textContent).toBe("true:false:a");
+		});
+		expect(result).toEqual(["a"]);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		await act(async function () {
+			await client.write({ key: ["todos"], query: TODOS }, { todos: ["live"] });
+		});
+
+		expect(screen.getByTestId("lazy").textContent).toBe("true:false:live");
 	});
 });

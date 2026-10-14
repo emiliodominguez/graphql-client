@@ -4,6 +4,9 @@
 
 ### Added
 
+- Type-level required variables. Omitting the `variables` a typed document requires is a compile error in `gql`, `watch`, `subscribe`, the hooks and `mutate`. `WithVariables` and `RequiredKeys` are exported.
+- `useLazyQuery`: an on-demand query that stays live once executed.
+- Strict persisted queries (`persistedQueries.strict`) for trusted documents and operation allow-lists.
 - Optimistic updates: the `optimistic` option and the typed `optimistic(target, update)` helper, with automatic rollback.
 - An `onError` hook, called once per failed operation after retries.
 - `keepPreviousData` and `isPreviousData` for `useQuery`.

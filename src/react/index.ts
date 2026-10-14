@@ -18,8 +18,10 @@ import type {
 	QueryState,
 	RequestOptions,
 	SubscribeOptions,
+	RequiredKeys,
 	TypedDocumentString,
 	WatchOptions,
+	WithVariables,
 } from "../types";
 import { stableStringify } from "../utils";
 
@@ -128,10 +130,17 @@ export interface MutationState<TData> extends QueryState<TData> {
  * @template TData - The shape of the `data` field
  * @template TVariables - The shape of the operation variables
  */
-export type MutateFunction<TData, TVariables> = (
-	variables?: TVariables,
-	options?: Omit<RequestOptions<TData, TVariables>, "query" | "variables">,
-) => Promise<TData>;
+export type MutateFunction<TData, TVariables> = [RequiredKeys<TVariables>] extends [never]
+	? (variables?: TVariables, options?: MutateOptions<TData, TVariables>) => Promise<TData>
+	: (variables: TVariables, options?: MutateOptions<TData, TVariables>) => Promise<TData>;
+
+/**
+ * Per-call options of a {@link MutateFunction}.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ */
+export type MutateOptions<TData, TVariables> = Omit<RequestOptions<TData, TVariables>, "query" | "variables">;
 
 /**
  * Options for {@link useSubscription}.
@@ -198,7 +207,7 @@ export function useClient(): Client {
  * @returns The query state and `refetch`
  */
 export function useQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
-	options: UseQueryOptions<TData, TVariables>,
+	options: WithVariables<UseQueryOptions<TData, TVariables>, TVariables>,
 ): UseQueryResult<TData, TVariables> {
 	const ref = useQueryRef(options);
 	const skip = options.skip === true;
@@ -237,7 +246,7 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
  * @returns The query state with defined `data`
  */
 export function useSuspenseQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
-	options: Omit<UseQueryOptions<TData, TVariables>, "skip">,
+	options: WithVariables<Omit<UseQueryOptions<TData, TVariables>, "skip">, TVariables>,
 ): UseSuspenseQueryResult<TData, TVariables> {
 	const client = useClient();
 	const identity = getIdentity(options);
@@ -249,7 +258,10 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 		function resolveRef(): QueryRef<TData, TVariables> {
 			const entry = requests.get(identity);
 
-			return (entry?.ref as QueryRef<TData, TVariables> | undefined) ?? client.watch<TData, TVariables>(options);
+			return (
+				(entry?.ref as QueryRef<TData, TVariables> | undefined) ??
+				client.watch<TData, TVariables>(options as WithVariables<WatchOptions<TData, TVariables>, TVariables>)
+			);
 		},
 		// `identity` captures every option that defines the query.
 		[client, requests, identity],
@@ -298,8 +310,8 @@ export function useMutation<TData = unknown, TVariables extends object = Record<
 	const latestCall = useRef(0);
 	const latestOptions = useLatest(options);
 
-	const mutate = useCallback<MutateFunction<TData, TVariables>>(
-		async function mutate(variables, overrides) {
+	const mutate = useCallback(
+		async function mutate(variables?: TVariables, overrides?: MutateOptions<TData, TVariables>): Promise<TData> {
 			const call = ++latestCall.current;
 
 			setState(function start(previous: QueryState<TData>): QueryState<TData> {
@@ -312,7 +324,7 @@ export function useMutation<TData = unknown, TVariables extends object = Record<
 					...overrides,
 					query,
 					variables,
-				});
+				} as WithVariables<RequestOptions<TData, TVariables>, TVariables>);
 
 				if (call === latestCall.current) setState({ data, error: undefined, loading: false });
 
@@ -343,6 +355,82 @@ export function useMutation<TData = unknown, TVariables extends object = Record<
 }
 
 /**
+ * Executes the lazy query with the given variables and resolves with its data.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ */
+export type LazyQueryExecute<TData, TVariables> = [RequiredKeys<TVariables>] extends [never]
+	? (variables?: TVariables) => Promise<TData>
+	: (variables: TVariables) => Promise<TData>;
+
+/**
+ * Result of {@link useLazyQuery}.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ */
+export interface UseLazyQueryResult<TData, TVariables> extends UseQueryResult<TData, TVariables> {
+	/** Whether `execute` was called at least once */
+	called: boolean;
+}
+
+/**
+ * A query that runs on demand (e.g. a search button). Nothing is fetched until `execute` is called; from then on the
+ * result is live like {@link useQuery}: it re-renders on invalidation, writes and refetches.
+ * Calling `execute` again with other variables switches the query (with `keepPreviousData`, the old data stays
+ * visible meanwhile).
+ *
+ * @example
+ * const [search, { data, loading, called }] = useLazyQuery(SEARCH, { keepPreviousData: true });
+ * // <button onClick={function () { search({ term }); }}>Search</button>
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ * @param query - The query document
+ * @param options - Query options (everything but `query`, `variables` and `skip`)
+ * @returns The execute function and the live query state
+ */
+export function useLazyQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
+	query: string | TypedDocumentString<TData, TVariables>,
+	options?: Omit<UseQueryOptions<TData, TVariables>, "query" | "variables" | "skip">,
+): [LazyQueryExecute<TData, TVariables>, UseLazyQueryResult<TData, TVariables>] {
+	const client = useClient();
+	const [execution, setExecution] = useState<{ variables: TVariables | undefined } | undefined>(undefined);
+	const latestOptions = useLatest(options);
+	const result = useQuery<TData, TVariables>({
+		...options,
+		query,
+		variables: execution?.variables,
+		skip: execution === undefined,
+	} as WithVariables<UseQueryOptions<TData, TVariables>, TVariables>);
+
+	const execute = useCallback(
+		function execute(variables?: TVariables): Promise<TData> {
+			setExecution({ variables });
+
+			// Shares the live query's request through deduplication, and resolves with this call's data.
+			return client.gql<TData, TVariables>({
+				...latestOptions.current,
+				query,
+				variables,
+			} as WithVariables<RequestOptions<TData, TVariables>, TVariables>);
+		},
+		[client, query, latestOptions],
+	);
+
+	return [
+		execute as LazyQueryExecute<TData, TVariables>,
+		useMemo(
+			function createResult(): UseLazyQueryResult<TData, TVariables> {
+				return { ...result, called: execution !== undefined };
+			},
+			[result, execution],
+		),
+	];
+}
+
+/**
  * Subscribes to a streamed operation (SSE subscription or `@defer` / `@stream` query) while mounted.
  * Reconnects when the document or variables change, and disconnects on unmount.
  *
@@ -352,7 +440,7 @@ export function useMutation<TData = unknown, TVariables extends object = Record<
  * @returns The latest payload, error and connection status
  */
 export function useSubscription<TData = unknown, TVariables extends object = Record<string, unknown>>(
-	options: UseSubscriptionOptions<TData, TVariables>,
+	options: WithVariables<UseSubscriptionOptions<TData, TVariables>, TVariables>,
 ): UseSubscriptionResult<TData> {
 	const client = useClient();
 	const identity = getIdentity(options);
@@ -381,7 +469,7 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 						operationName,
 						headers,
 						signal: controller.signal,
-					});
+					} as WithVariables<SubscribeOptions<TData, TVariables>, TVariables>);
 
 					for await (const data of stream) {
 						setState({ data, error: undefined, active: true });
@@ -428,7 +516,7 @@ function useQueryRef<TData, TVariables extends object>(
 
 	return useMemo(
 		function createQueryRef(): QueryRef<TData, TVariables> {
-			return client.watch<TData, TVariables>(options);
+			return client.watch<TData, TVariables>(options as WithVariables<WatchOptions<TData, TVariables>, TVariables>);
 		},
 		// `identity` captures every option that defines the query.
 		[client, identity],

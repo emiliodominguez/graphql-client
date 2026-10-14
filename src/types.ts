@@ -228,8 +228,13 @@ export interface RetryOptions {
  * Automatic Persisted Queries options.
  */
 export interface PersistedQueriesOptions {
-	/** Custom document hash. Defaults to SHA-256 via Web Crypto. */
+	/** Custom document hash (e.g. precomputed ids from a manifest). Defaults to SHA-256 via Web Crypto. */
 	hash?: ((query: string) => MaybePromise<string>) | undefined;
+	/**
+	 * Trusted documents: only ever send the hash, never the document, and fail instead of falling back.
+	 * For servers that only execute an allow-list of registered operations.
+	 */
+	strict?: boolean | undefined;
 }
 
 /**
@@ -366,3 +371,21 @@ export interface FetchMoreOptions<TData, TVariables> {
 	 */
 	merge(previous: TData, next: TData): TData;
 }
+
+/**
+ * Keys of `T` that are not optional.
+ *
+ * @template T - An object type
+ */
+export type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
+
+/**
+ * Makes `variables` required on `TOptions` when the document declares required variables, so forgetting them is a
+ * compile error. Documents without variables (or with only optional ones) keep `variables` optional.
+ *
+ * @template TOptions - The options type
+ * @template TVariables - The shape of the operation variables
+ */
+export type WithVariables<TOptions, TVariables> = [RequiredKeys<TVariables>] extends [never]
+	? TOptions
+	: TOptions & { variables: TVariables };

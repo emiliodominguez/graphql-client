@@ -551,7 +551,7 @@ describe("fetchMore", function () {
 	});
 
 	it("uses the fetched page as-is when there is no data yet", async function () {
-		const ref = new Client({ url: URL, fetch: pages() }).watch<{ feed: number[] }, { after: number }>({ query: FEED });
+		const ref = new Client({ url: URL, fetch: pages() }).watch<{ feed: number[] }, { after?: number }>({ query: FEED });
 		const merge = vi.fn(concat);
 
 		expect((await ref.fetchMore({ variables: { after: 2 }, merge })).data).toEqual({ feed: [3, 4] });

@@ -25,6 +25,7 @@ import type {
 	RequestOptions,
 	SubscribeOptions,
 	WatchOptions,
+	WithVariables,
 } from "./types";
 import { createUploadBody, extractFiles } from "./upload";
 import {
@@ -157,7 +158,7 @@ export class Client {
 	 * @throws {Error} With `cache-only` when nothing is cached
 	 */
 	async gql<TData = unknown, TVariables extends object = Record<string, unknown>>(
-		options: RequestOptions<TData, TVariables>,
+		options: WithVariables<RequestOptions<TData, TVariables>, TVariables>,
 	): Promise<TData> {
 		const { cache } = this.configuration;
 		const query = String(options.query);
@@ -271,7 +272,7 @@ export class Client {
 	 * @throws {ClientError} On a non-2xx status or when a payload carries GraphQL errors
 	 */
 	async *subscribe<TData = unknown, TVariables extends object = Record<string, unknown>>(
-		options: SubscribeOptions<TData, TVariables>,
+		options: WithVariables<SubscribeOptions<TData, TVariables>, TVariables>,
 	): AsyncGenerator<TData, void, undefined> {
 		const query = String(options.query);
 		const operation = parseOperation(query, options.operationName);
@@ -356,7 +357,7 @@ export class Client {
 	 * @returns The observable query
 	 */
 	watch<TData = unknown, TVariables extends object = Record<string, unknown>>(
-		options: WatchOptions<TData, TVariables>,
+		options: WithVariables<WatchOptions<TData, TVariables>, TVariables>,
 	): QueryRef<TData, TVariables> {
 		const client = this;
 		const query = String(options.query);
@@ -612,9 +613,12 @@ export class Client {
 		signal: AbortSignal,
 	): Promise<TData> {
 		const { variables, operationName } = options;
+		const { persistedQueries } = this.configuration;
+		const strict = typeof persistedQueries === "object" && persistedQueries.strict === true;
 		const method = context.type === "query" ? (this.configuration.method ?? "POST") : "POST";
-		const hash =
-			this.configuration.persistedQueries && this.persistedQueriesSupported
+		const hash = strict
+			? await this.hash(query)
+			: persistedQueries && this.persistedQueriesSupported
 				? // A failing hash (e.g. no `crypto.subtle` on insecure origins) falls back to sending the full document.
 					await this.hash(query).catch(ignoreError)
 				: undefined;
@@ -632,7 +636,8 @@ export class Client {
 			} catch (error) {
 				const miss = getPersistedQueryMiss(error);
 
-				if (!miss) throw error;
+				// Trusted documents never reveal the document: an unknown hash is an error, not a negotiation.
+				if (!miss || strict) throw error;
 
 				if (miss === "unsupported") {
 					this.persistedQueriesSupported = false;

@@ -26,10 +26,12 @@ export type {
 	PersistedQueriesOptions,
 	QueryState,
 	RequestOptions,
+	RequiredKeys,
 	RetryOptions,
 	SubscribeOptions,
 	SubscriptionRequest,
 	SubscriptionTransport,
 	TypedDocumentString,
 	WatchOptions,
+	WithVariables,
 } from "./types";

@@ -538,3 +538,50 @@ describe("subscribe", function () {
 		expect(consoleDebug).toHaveBeenCalledWith("[graphql-client] subscription OnMessage → streaming");
 	});
 });
+
+describe("strict persisted queries", function () {
+	it("only ever sends the hash and fails on unknown documents", async function () {
+		const fetchMock = vi.fn<typeof fetch>(async function (input) {
+			const body = await (input as Request).clone().json();
+
+			return body.extensions.persistedQuery.sha256Hash === "known"
+				? json({ data: USER })
+				: json({ errors: [{ message: "PersistedQueryNotFound" }] });
+		});
+		const client = createClient(fetchMock, {
+			persistedQueries: {
+				strict: true,
+				hash(query: string) {
+					return query.includes("GetUser") ? "known" : "unknown";
+				},
+			},
+		});
+
+		expect(await client.gql({ query: GET_USER })).toEqual(USER);
+		await expect(client.gql({ query: "{ secret }" })).rejects.toThrow("PersistedQueryNotFound");
+
+		const bodies = await Promise.all(
+			fetchMock.mock.calls.map(function (call) {
+				return (call[0] as Request).json();
+			}),
+		);
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		for (const body of bodies) expect(body).not.toHaveProperty("query");
+	});
+
+	it("propagates hash failures instead of sending the document", async function () {
+		const fetchMock = sequence(ok);
+		const client = createClient(fetchMock, {
+			persistedQueries: {
+				strict: true,
+				hash() {
+					throw new Error("not in manifest");
+				},
+			},
+		});
+
+		await expect(client.gql({ query: GET_USER })).rejects.toThrow("not in manifest");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
