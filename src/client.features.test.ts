@@ -92,7 +92,7 @@ function eventStream(chunks: string[], onCancel?: () => void): Response {
 			for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
 			if (!onCancel) controller.close();
 		},
-		cancel: onCancel,
+		...(onCancel ? { cancel: onCancel } : {}),
 	});
 
 	return new Response(body, { headers: { "Content-Type": "text/event-stream" } });

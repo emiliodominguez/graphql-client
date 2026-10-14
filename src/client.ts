@@ -10,7 +10,7 @@ import {
 	type IncrementalState,
 } from "./incremental";
 import { QueryRef, type QueryWatcher } from "./query-ref";
-import { resolveRetryPolicy } from "./retry";
+import { resolveRetryPolicy, rethrowNetworkFailure } from "./retry";
 import { readServerSentEvents } from "./sse";
 import type {
 	CacheKey,
@@ -47,10 +47,10 @@ const ACCEPT = "application/graphql-response+json, application/json;q=0.9";
  * The request payload sent to the server (as a JSON body or as GET search params).
  */
 interface Payload {
-	query?: string;
+	query?: string | undefined;
 	variables?: unknown;
-	operationName?: string;
-	extensions?: Record<string, unknown>;
+	operationName?: string | undefined;
+	extensions?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -317,13 +317,21 @@ export class Client {
 			this.log(operation, "streaming");
 
 			const state = createIncrementalState();
+			let last: unknown;
 
 			for await (const payload of source) {
 				const { data, errors } = applyIncremental(state, payload);
 
 				if (errors.length) throw createGraphQLError(response, errors, data);
-				if (data !== undefined) yield data as TData;
+
+				// A trailing `completed`/`hasNext: false` payload changes nothing: don't yield the same result twice.
+				if (data !== undefined && data !== last) {
+					last = data;
+					yield data as TData;
+				}
 			}
+
+			if (state.hasNext && !scope.signal.aborted) throw incompleteError(response, state.data);
 		} catch (error) {
 			if (!scope.signal.aborted) this.report(error, context, options.signal);
 
@@ -442,7 +450,8 @@ export class Client {
 
 		if (!cache) return snapshot;
 
-		for (const key of await cache.keys()) {
+		// Snapshot the keys: reading may reorder a live iterator (e.g. a Map-backed LRU) and loop forever.
+		for (const key of [...(await cache.keys())]) {
 			if (!matchesKeyPrefix(key, [])) continue;
 
 			const data = await cache.get(key);
@@ -509,9 +518,12 @@ export class Client {
 	}
 
 	/**
-	 * Creates a new client with the given configuration overrides. The cache instance is shared unless overridden,
-	 * which makes it handy for per-request headers in SSR. Clients sharing a cache also share live-query
-	 * notifications and request ordering. Overrides replace values; they are not deep-merged.
+	 * Creates a new client with the given configuration overrides. The cache instance is shared unless overridden.
+	 * Clients sharing a cache also share live-query notifications and request ordering.
+	 * Overrides replace values; they are not deep-merged.
+	 *
+	 * Cache keys do not include auth: when overriding `authToken`/`headers` per user (e.g. per SSR request),
+	 * also pass a fresh `cache`, or users would see each other's data.
 	 *
 	 * @param overrides - Configuration values to replace
 	 * @returns A new client
@@ -602,7 +614,10 @@ export class Client {
 		const { variables, operationName } = options;
 		const method = context.type === "query" ? (this.configuration.method ?? "POST") : "POST";
 		const hash =
-			this.configuration.persistedQueries && this.persistedQueriesSupported ? await this.hash(query) : undefined;
+			this.configuration.persistedQueries && this.persistedQueriesSupported
+				? // A failing hash (e.g. no `crypto.subtle` on insecure origins) falls back to sending the full document.
+					await this.hash(query).catch(ignoreError)
+				: undefined;
 		const extensions = hash === undefined ? undefined : { persistedQuery: { version: 1, sha256Hash: hash } };
 
 		if (extensions) {
@@ -719,7 +734,7 @@ export class Client {
 		function call(index: number, current: Request): Promise<Response> {
 			const handler = middleware[index];
 
-			if (!handler) return fetchFn(current);
+			if (!handler) return fetchFn(current).catch(rethrowNetworkFailure);
 
 			return handler(
 				current,
@@ -804,7 +819,7 @@ export class Client {
 	private async parseResponse<TData>(response: Response, signal?: AbortSignal): Promise<TData> {
 		const { status } = response;
 		const contentType = response.headers.get("Content-Type") ?? "";
-		let body: GraphQLResponse<TData> | undefined;
+		let body: (GraphQLResponse<TData> & { incomplete?: boolean }) | undefined;
 
 		try {
 			body =
@@ -832,6 +847,8 @@ export class Client {
 		if (data === undefined) {
 			throw new ClientError("No data found in the GraphQL response.", { status, response });
 		}
+
+		if (body?.incomplete) throw incompleteError(response, data);
 
 		return data;
 	}
@@ -1058,6 +1075,30 @@ function createGraphQLError(
 }
 
 /**
+ * Creates the error for an incremental response that ended before its last payload.
+ *
+ * @param response - The fetch Response, absent for non-HTTP transports
+ * @param data - The data merged so far
+ * @returns The error
+ */
+function incompleteError(response: Response | undefined, data: unknown): ClientError {
+	return new ClientError("Incomplete incremental response: the stream ended before every payload arrived.", {
+		status: response?.status ?? 0,
+		response,
+		data,
+	});
+}
+
+/**
+ * Swallows an error.
+ *
+ * @returns `undefined`
+ */
+function ignoreError(): undefined {
+	return undefined;
+}
+
+/**
  * Parses streamed JSON chunks.
  *
  * @param chunks - Raw JSON strings
@@ -1094,7 +1135,8 @@ async function* readServerSentEventData(body: ReadableStream<Uint8Array>, signal
 }
 
 /**
- * Consumes a whole `multipart/mixed` incremental response and returns the merged result.
+ * Consumes a whole `multipart/mixed` incremental response and returns the merged result, flagged `incomplete` when
+ * the stream ended while the server still announced more payloads.
  *
  * @template TData - The shape of the `data` field
  * @param body - The response body
@@ -1106,14 +1148,21 @@ async function collectIncremental<TData>(
 	body: ReadableStream<Uint8Array>,
 	boundary: string,
 	signal?: AbortSignal,
-): Promise<GraphQLResponse<TData>> {
+): Promise<GraphQLResponse<TData> & { incomplete?: boolean }> {
 	const state: IncrementalState = createIncrementalState();
 
 	for await (const chunk of readMultipartMixed(body, boundary, signal)) {
 		applyIncremental(state, JSON.parse(chunk) as IncrementalPayload);
 	}
 
-	return { data: state.data as TData | undefined, errors: state.errors.length ? state.errors : undefined };
+	// A cancelled reader ends like a finished stream: an abort or timeout must still reject.
+	signal?.throwIfAborted();
+
+	return {
+		data: state.data as TData | undefined,
+		errors: state.errors.length ? state.errors : undefined,
+		incomplete: state.hasNext,
+	};
 }
 
 /**

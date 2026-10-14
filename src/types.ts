@@ -37,11 +37,11 @@ export interface GraphQLFormattedError {
 	/** Human-readable description of the error */
 	readonly message: string;
 	/** Source locations in the document the error refers to */
-	readonly locations?: ReadonlyArray<{ readonly line: number; readonly column: number }>;
+	readonly locations?: ReadonlyArray<{ readonly line: number; readonly column: number }> | undefined;
 	/** Path to the response field that produced the error */
-	readonly path?: ReadonlyArray<string | number>;
+	readonly path?: ReadonlyArray<string | number> | undefined;
 	/** Implementation-specific metadata (error codes, etc.) */
-	readonly extensions?: Record<string, unknown>;
+	readonly extensions?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -51,11 +51,11 @@ export interface GraphQLFormattedError {
  */
 export interface GraphQLResponse<TData> {
 	/** The operation result, possibly partial when `errors` is present */
-	data?: TData | null;
+	data?: TData | null | undefined;
 	/** Errors raised while executing the operation */
-	errors?: ReadonlyArray<GraphQLFormattedError>;
+	errors?: ReadonlyArray<GraphQLFormattedError> | undefined;
 	/** Implementation-specific metadata */
-	extensions?: Record<string, unknown>;
+	extensions?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -113,37 +113,37 @@ export interface ClientConfiguration {
 	/** GraphQL endpoint URL */
 	url: string;
 	/** Bearer token sent as `Authorization: Bearer <token>`. Use a function to refresh tokens lazily. */
-	authToken?: AuthTokenResolver;
+	authToken?: AuthTokenResolver | undefined;
 	/** Extra headers for every request. Use a function for dynamic values. */
-	headers?: HeadersResolver;
+	headers?: HeadersResolver | undefined;
 	/** Cache used for query results. Caching is disabled when omitted. */
-	cache?: Cache;
+	cache?: Cache | undefined;
 	/** Custom `fetch` implementation (SSR, testing, instrumentation). Defaults to `globalThis.fetch`. */
-	fetch?: typeof fetch;
-	/** Default request timeout in milliseconds. Disabled when omitted. */
-	timeout?: number;
+	fetch?: typeof fetch | undefined;
+	/** Default request timeout in milliseconds. Disabled when omitted, `0` or not finite. */
+	timeout?: number | undefined;
 	/** Share a single network request between identical in-flight queries. Defaults to `true`. */
-	dedupe?: boolean;
+	dedupe?: boolean | undefined;
 	/** Logs operations, cache hits and timings through `console.debug`. */
-	debug?: boolean;
+	debug?: boolean | undefined;
 	/** Retry policy for failed requests. Disabled by default. A number sets the attempts with default backoff. */
-	retry?: number | RetryOptions;
+	retry?: number | RetryOptions | undefined;
 	/** Fetch-level middleware, run in order around every request (including retries). */
-	middleware?: ReadonlyArray<Middleware>;
+	middleware?: ReadonlyArray<Middleware> | undefined;
 	/** HTTP method for queries. `GET` enables CDN/browser caching. Mutations always use `POST`. Defaults to `POST`. */
-	method?: "GET" | "POST";
+	method?: "GET" | "POST" | undefined;
 	/** Automatic Persisted Queries: send a SHA-256 hash first and the full document only when the server asks. */
-	persistedQueries?: boolean | PersistedQueriesOptions;
+	persistedQueries?: boolean | PersistedQueriesOptions | undefined;
 	/**
 	 * Called once for every failed operation (after retries), e.g. to report errors or sign out on 401.
 	 * Not called when the caller aborted the operation. Errors thrown by the hook are ignored.
 	 */
-	onError?: (error: unknown, context: OperationContext) => void;
+	onError?: ((error: unknown, context: OperationContext) => void) | undefined;
 	/**
 	 * Transport for `subscription` operations (e.g. the WebSocket transport from `/ws`).
 	 * Defaults to GraphQL over SSE through `fetch`.
 	 */
-	subscriptionTransport?: SubscriptionTransport;
+	subscriptionTransport?: SubscriptionTransport | undefined;
 }
 
 /**
@@ -153,9 +153,9 @@ export interface SubscriptionRequest {
 	/** The GraphQL document */
 	query: string;
 	/** Operation variables */
-	variables?: unknown;
+	variables?: unknown | undefined;
 	/** The selected operation name */
-	operationName?: string;
+	operationName?: string | undefined;
 }
 
 /**
@@ -180,11 +180,11 @@ export interface OperationContext {
 	/** The operation type */
 	type: OperationType;
 	/** The operation name, if any */
-	name?: string;
+	name?: string | undefined;
 	/** The GraphQL document */
 	query: string;
 	/** Operation variables */
-	variables?: unknown;
+	variables?: unknown | undefined;
 	/** Zero-based attempt number (`0` is the first try) */
 	attempt: number;
 }
@@ -211,17 +211,17 @@ export type Middleware = (request: Request, next: MiddlewareNext, context: Opera
  */
 export interface RetryOptions {
 	/** Maximum number of retries after the first attempt. Defaults to `2`. */
-	attempts?: number;
+	attempts?: number | undefined;
 	/**
 	 * Delay before a retry, in milliseconds, or a function of the retry index (0-based) and the error.
 	 * Defaults to exponential backoff with jitter (≈1s, 2s, 4s… capped at 30s), honoring `Retry-After`.
 	 */
-	delay?: number | ((retry: number, error: unknown) => number);
+	delay?: (number | ((retry: number, error: unknown) => number)) | undefined;
 	/**
 	 * Decides whether an error is retryable.
 	 * Defaults to network failures and HTTP 408/429/5xx, for queries only (mutations are not idempotent).
 	 */
-	retryIf?: (error: unknown, context: OperationContext) => boolean;
+	retryIf?: ((error: unknown, context: OperationContext) => boolean) | undefined;
 }
 
 /**
@@ -229,7 +229,7 @@ export interface RetryOptions {
  */
 export interface PersistedQueriesOptions {
 	/** Custom document hash. Defaults to SHA-256 via Web Crypto. */
-	hash?: (query: string) => MaybePromise<string>;
+	hash?: ((query: string) => MaybePromise<string>) | undefined;
 }
 
 /**
@@ -242,11 +242,11 @@ export interface RequestOptions<TData, TVariables> {
 	/** The GraphQL document, as a plain string or a typed document */
 	query: string | TypedDocumentString<TData, TVariables>;
 	/** Operation variables */
-	variables?: TVariables;
+	variables?: TVariables | undefined;
 	/** Selects the operation to run when the document contains several */
-	operationName?: string;
+	operationName?: string | undefined;
 	/** Hierarchical cache key used for grouping and invalidation. Defaults to `[]`. */
-	key?: CacheKey;
+	key?: CacheKey | undefined;
 	/**
 	 * How the cache is used. Defaults to `cache-first` for queries and `no-cache` for mutations.
 	 * - `cache-first`: serve from the cache, fetch on a miss and store the result
@@ -254,22 +254,22 @@ export interface RequestOptions<TData, TVariables> {
 	 * - `cache-only`: serve from the cache, throw on a miss
 	 * - `no-cache`: always fetch, never read nor write the cache
 	 */
-	fetchPolicy?: FetchPolicy;
+	fetchPolicy?: FetchPolicy | undefined;
 	/** Extra headers merged on top of the client headers */
-	headers?: HeadersInit;
+	headers?: HeadersInit | undefined;
 	/** Abort signal for this call */
-	signal?: AbortSignal;
-	/** Timeout in milliseconds for this call, covering every retry. Overrides the client default. */
-	timeout?: number;
+	signal?: AbortSignal | undefined;
+	/** Timeout in milliseconds for this call, covering every retry. Overrides the client default; `0` disables it. */
+	timeout?: number | undefined;
 	/** Retry policy for this call. Overrides the client default; `false` disables retries. */
-	retry?: number | RetryOptions | false;
+	retry?: number | RetryOptions | false | undefined;
 	/** Cache key prefixes to invalidate once the operation succeeds (typically after a mutation). */
-	invalidates?: ReadonlyArray<CacheKey>;
+	invalidates?: ReadonlyArray<CacheKey> | undefined;
 	/**
 	 * Cache entries to update immediately, before the server answers. Every update is rolled back if the operation
 	 * fails. Build entries with {@link optimistic} for full typing; pair with `invalidates` to reconcile.
 	 */
-	optimistic?: ReadonlyArray<OptimisticUpdate<unknown, unknown>>;
+	optimistic?: ReadonlyArray<OptimisticUpdate<unknown, unknown>> | undefined;
 }
 
 /**
@@ -328,13 +328,13 @@ export interface QueryState<TData> {
  */
 export interface WatchOptions<TData, TVariables> extends RequestOptions<TData, TVariables> {
 	/** Refetch every N milliseconds while observed */
-	pollInterval?: number;
+	pollInterval?: number | undefined;
 	/** Refetch when the page becomes visible again */
-	refetchOnFocus?: boolean;
+	refetchOnFocus?: boolean | undefined;
 	/** Refetch when the network comes back online */
-	refetchOnReconnect?: boolean;
+	refetchOnReconnect?: boolean | undefined;
 	/** Data to start from when the cache has none, treated as fresh (e.g. server-provided or suspense data) */
-	initialData?: TData;
+	initialData?: TData | undefined;
 }
 
 /**

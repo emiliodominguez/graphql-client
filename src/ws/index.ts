@@ -33,19 +33,19 @@ export interface WebSocketTransportOptions {
 	/** WebSocket endpoint (`ws://` or `wss://`) */
 	url: string;
 	/** Sent with `connection_init` (typically auth). Evaluated on every (re)connect. */
-	connectionParams?: Record<string, unknown> | (() => MaybePromise<Record<string, unknown> | undefined>);
+	connectionParams?: (Record<string, unknown> | (() => MaybePromise<Record<string, unknown> | undefined>)) | undefined;
 	/** WebSocket implementation. Defaults to `globalThis.WebSocket`. */
-	WebSocket?: WebSocketConstructor;
+	WebSocket?: WebSocketConstructor | undefined;
 	/** Close the socket this many milliseconds after the last subscription ends. `Infinity` keeps it open. Defaults to `0`. */
-	lazyCloseTimeout?: number;
+	lazyCloseTimeout?: number | undefined;
 	/** Maximum consecutive reconnect attempts before failing active subscriptions. Defaults to `5`. */
-	retryAttempts?: number;
+	retryAttempts?: number | undefined;
 	/** Delay before a reconnect attempt (1-based). Defaults to exponential backoff with jitter, capped at 30s. */
-	retryDelay?: (attempt: number) => number;
+	retryDelay?: ((attempt: number) => number) | undefined;
 	/** Fail the connection when `connection_ack` takes longer than this. Defaults to `10_000`. */
-	connectionAckTimeout?: number;
+	connectionAckTimeout?: number | undefined;
 	/** Send a ping at this interval and reconnect if the previous one got no pong. Disabled by default. */
-	keepAlive?: number;
+	keepAlive?: number | undefined;
 }
 
 /**
@@ -66,8 +66,8 @@ export interface WebSocketTransport extends SubscriptionTransport {
  */
 interface Message {
 	type: string;
-	id?: string;
-	payload?: unknown;
+	id?: string | undefined;
+	payload?: unknown | undefined;
 }
 
 /**

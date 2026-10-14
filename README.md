@@ -183,7 +183,7 @@ import { StorageCache } from "@emiliodominguez/graphql-client";
 const client = new Client({ url, cache: new StorageCache({ prefix: "app:", ttl: 24 * 60 * 60_000 }) });
 ```
 
-It is namespaced, honors the TTL and drops corrupted entries. If storage is full or unavailable it falls back to a cache miss rather than throwing.
+It is namespaced (use distinct, non-nested prefixes: `app:` and `admin:`, not `gql:` and `gql:admin:`), honors the TTL and drops corrupted entries. If storage is full or unavailable it falls back to a cache miss rather than throwing.
 
 ### Custom cache adapters
 
@@ -316,8 +316,8 @@ Components using the same entry share one request, and invalidations and `write(
 ## SSR
 
 ```ts
-// Server
-const client = new Client({ url, cache: new MemoryCache() });
+// Server: one client and cache per request
+const client = baseClient.extend({ authToken: session.token, cache: new MemoryCache() });
 await client.gql({ key: ["todos"], query: TODOS }); // or render with your framework's data loading
 const snapshot = await client.extract();
 // embed JSON.stringify(snapshot) in the HTML (escape "<" when inlining in a <script>)
@@ -327,7 +327,9 @@ const client = new Client({ url, cache: new MemoryCache() });
 await client.restore(window.__GRAPHQL_STATE__);
 ```
 
-`useQuery` reads the restored cache synchronously, so the first render matches the server HTML without a loading state. To give each server request its own headers while sharing the cache, use `client.extend({ authToken })`.
+`useQuery` reads the restored cache synchronously, so the first render matches the server HTML without a loading state.
+
+> **Never share a cache between users on the server.** Cache keys identify the operation, not the user or their headers, so a shared cache would serve one user's data to another, and `extract()` would put everyone's entries into the page. Create a cache per request, as above. `extend()` keeps the shared configuration (URL, middleware, retries) while you swap the auth and the cache.
 
 ## Auth and headers
 
@@ -342,7 +344,7 @@ const client = new Client({
 
 await client.gql({ query, headers: { "X-Request-Id": crypto.randomUUID() } }); // per-call headers
 
-const userClient = client.extend({ authToken: session.token }); // derived client, shared cache
+const userClient = client.extend({ authToken: session.token, cache: new MemoryCache() }); // per-user client
 ```
 
 Precedence from lowest to highest: defaults, `authToken`, client `headers`, call `headers`.
@@ -475,7 +477,7 @@ const controller = new AbortController();
 await client.gql({ query, signal: controller.signal, timeout: 5_000 });
 ```
 
-An abort rejects with the signal's reason, usually an `AbortError`. A timeout rejects with a `TimeoutError` `DOMException`. The timeout covers the whole operation, retries and backoff included.
+Set `timeout: 0` to disable the client's default timeout for a single call. Non-finite values also mean no timeout. An abort rejects with the signal's reason, usually an `AbortError`. A timeout rejects with a `TimeoutError` `DOMException`. The timeout covers the whole operation, retries and backoff included.
 
 ## Error handling
 
@@ -541,7 +543,7 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 | `invalidate(prefix?)`                  | Removes cached results under a key prefix and refetches watchers. Returns the number removed.                                                                |
 | `read(target)` / `write(target, data)` | Reads or writes a cache entry; `write` notifies watchers.                                                                                                    |
 | `extract()` / `restore(snapshot)`      | Serializes the cache or hydrates it (SSR).                                                                                                                   |
-| `extend(overrides): Client`            | Returns a derived client that shares the cache unless you override it.                                                                                       |
+| `extend(overrides): Client`            | Returns a derived client that shares the cache unless you override it. Give each user their own cache.                                                       |
 
 ### `gql` / `watch` options
 

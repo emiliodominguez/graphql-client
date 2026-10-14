@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MemoryCache } from "./cache/memory-cache";
+import { StorageCache } from "./cache/storage-cache";
 import { Client } from "./client";
 import { dedupeFragments, graphql, minify } from "./document";
 
@@ -301,7 +302,7 @@ describe("misc", function () {
 		expect(new Set([first, second, third]).size).toBe(3);
 	});
 
-	it("retries a failed persisted-query hash instead of memoizing the failure", async function () {
+	it("falls back to the full document when hashing fails, and retries the hash later", async function () {
 		const fetchMock = vi.fn<typeof fetch>(async function () {
 			return Response.json({ data: { a: 1 } });
 		});
@@ -317,8 +318,17 @@ describe("misc", function () {
 			},
 		});
 
-		await expect(client.gql({ query: "{ a }" })).rejects.toThrow("hash failed");
 		expect(await client.gql({ query: "{ a }" })).toEqual({ a: 1 });
+		expect(await client.gql({ query: "{ a }", fetchPolicy: "no-cache" })).toEqual({ a: 1 });
+
+		const [first, second] = await Promise.all(
+			fetchMock.mock.calls.map(function (call) {
+				return (call[0] as Request).json();
+			}),
+		);
+
+		expect(first).toEqual({ query: "{ a }" });
+		expect(second).toMatchObject({ extensions: { persistedQuery: { sha256Hash: "h" } } });
 		expect(calls).toBe(2);
 	});
 });
@@ -374,3 +384,234 @@ describe("documents", function () {
 		expect(dedupeFragments(`${fragment}\n${fragment}\nquery { ...F }`)).toBe(`${fragment}\n\nquery { ...F }`);
 	});
 });
+
+describe("review 2", function () {
+	/**
+	 * Builds a multipart/mixed response from raw parts, optionally left open (never closed).
+	 *
+	 * @param parts - JSON payloads
+	 * @param close - Whether to send the closing delimiter and end the stream
+	 * @returns The response
+	 */
+	function multipart(parts: unknown[], close = true): Response {
+		const encoder = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const part of parts) {
+					controller.enqueue(
+						encoder.encode(`\r\n---\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(part)}`),
+					);
+				}
+
+				if (close) {
+					controller.enqueue(encoder.encode("\r\n-----\r\n"));
+					controller.close();
+				}
+			},
+		});
+
+		return new Response(body, { headers: { "Content-Type": 'multipart/mixed; boundary="-"' } });
+	}
+
+	const DEFERRED = "query D { a ... @defer { b } }";
+	const FIRST = { data: { a: 1 }, pending: [{ id: "0", path: [] }], hasNext: true };
+
+	it("rejects (and does not cache) a truncated incremental response", async function () {
+		const cache = new MemoryCache();
+		const client = new Client({
+			url: URL,
+			cache,
+			fetch: vi.fn<typeof fetch>(async function () {
+				return multipart([FIRST]);
+			}),
+		});
+
+		await expect(client.gql({ query: DEFERRED })).rejects.toMatchObject({
+			message: expect.stringContaining("Incomplete incremental response"),
+			data: { a: 1 },
+		});
+		expect(cache.size).toBe(0);
+
+		await expect(
+			(async function () {
+				for await (const _ of client.subscribe({ query: DEFERRED })) {
+					// drain
+				}
+			})(),
+		).rejects.toThrow("Incomplete incremental response");
+	});
+
+	it("times out mid-stream even when the body is not tied to the signal", async function () {
+		const client = new Client({
+			url: URL,
+			cache: new MemoryCache(),
+			fetch: vi.fn<typeof fetch>(async function () {
+				return multipart([FIRST], false);
+			}),
+		});
+
+		await expect(client.gql({ query: DEFERRED, timeout: 20 })).rejects.toMatchObject({ name: "TimeoutError" });
+	});
+
+	it("does not yield an unchanged final payload twice", async function () {
+		const client = new Client({
+			url: URL,
+			fetch: vi.fn<typeof fetch>(async function () {
+				return multipart([
+					FIRST,
+					{ incremental: [{ id: "0", data: { b: 2 } }], hasNext: true },
+					{ completed: [{ id: "0" }], hasNext: false },
+				]);
+			}),
+		});
+		const values: unknown[] = [];
+
+		for await (const data of client.subscribe({ query: DEFERRED })) values.push(data);
+
+		expect(values).toEqual([{ a: 1 }, { a: 1, b: 2 }]);
+	});
+
+	it("keeps no-cache and cache-only live queries within their policy", async function () {
+		const cache = new MemoryCache();
+		const fetchMock = vi.fn<typeof fetch>(async function () {
+			return Response.json({ data: { todos: 1 } });
+		});
+		const client = new Client({ url: URL, fetch: fetchMock, cache });
+		const uncached = client.watch<{ todos: number }>({ query: TODOS, fetchPolicy: "no-cache" });
+		const stop = uncached.subscribe(function () {});
+
+		await tick();
+		await uncached.refetch();
+		await uncached.fetchMore({
+			variables: {},
+			merge(previous) {
+				return previous;
+			},
+		});
+		expect(cache.size).toBe(0);
+		stop();
+
+		await client.write({ key: ["c"], query: TODOS }, { todos: 0 });
+
+		const calls = fetchMock.mock.calls.length;
+		const cacheOnly = client.watch({ key: ["c"], query: TODOS, fetchPolicy: "cache-only" });
+		const stopCacheOnly = cacheOnly.subscribe(function () {});
+
+		await client.invalidate(["c"]);
+		await tick();
+
+		expect(fetchMock.mock.calls.length).toBe(calls);
+		expect(cacheOnly.getState().error).toBeInstanceOf(Error);
+		stopCacheOnly();
+	});
+
+	it("extract() terminates with caches returning live iterators", async function () {
+		const map = new Map<string, unknown>();
+		const client = new Client({
+			url: URL,
+			fetch: vi.fn<typeof fetch>(async function () {
+				return Response.json({ data: { todos: 1 } });
+			}),
+			cache: {
+				get<T>(key: string) {
+					const value = map.get(key);
+
+					// LRU-style touch: re-insert at the end, which revisits the key in a live iterator.
+					map.delete(key);
+					map.set(key, value);
+
+					return value as T;
+				},
+				set(key: string, value: unknown) {
+					map.set(key, value);
+				},
+				delete(key: string) {
+					map.delete(key);
+				},
+				clear() {
+					map.clear();
+				},
+				keys() {
+					return map.keys();
+				},
+			},
+		});
+
+		await client.gql({ key: ["a"], query: TODOS });
+		await client.gql({ key: ["b"], query: TODOS });
+
+		expect(Object.keys(await client.extract())).toHaveLength(2);
+	});
+
+	it("treats invalid numbers safely", async function () {
+		const fetchMock = vi.fn<typeof fetch>(async function () {
+			return Response.json({}, { status: 503 });
+		});
+		const client = new Client({ url: URL, fetch: fetchMock, retry: { attempts: Number.NaN, delay: 0 } });
+
+		await expect(client.gql({ query: TODOS })).rejects.toMatchObject({ status: 503 });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		const ok = vi.fn<typeof fetch>(async function () {
+			return Response.json({ data: { todos: 1 } });
+		});
+		const timed = new Client({ url: URL, fetch: ok, timeout: 10_000 });
+
+		expect(await timed.gql({ query: TODOS, timeout: Number.NaN })).toEqual({ todos: 1 });
+		expect(await timed.gql({ query: TODOS, timeout: 0, fetchPolicy: "no-cache" })).toEqual({ todos: 1 });
+		expect(function () {
+			return new StorageCache({ storage: localStorageStub(), ttl: Number.NaN });
+		}).toThrow(RangeError);
+	});
+
+	it("does not retry deterministic TypeErrors raised before fetch", async function () {
+		const fetchMock = vi.fn<typeof fetch>();
+		const relative = new Client({ url: "/graphql", fetch: fetchMock, retry: { attempts: 3, delay: 60_000 } });
+
+		await expect(relative.gql({ query: TODOS })).rejects.toBeInstanceOf(TypeError);
+		expect(fetchMock).not.toHaveBeenCalled();
+
+		const reads = vi.fn();
+		const consuming = new Client({
+			url: URL,
+			fetch: fetchMock,
+			retry: { attempts: 3, delay: 60_000 },
+			middleware: [
+				async function (request, next) {
+					reads(await request.text());
+					return next();
+				},
+			],
+		});
+
+		await expect(consuming.gql({ query: TODOS })).rejects.toBeInstanceOf(TypeError);
+		expect(reads).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * Minimal Web Storage stub.
+ *
+ * @returns The storage
+ */
+function localStorageStub() {
+	const map = new Map<string, string>();
+
+	return {
+		get length() {
+			return map.size;
+		},
+		key(index: number) {
+			return [...map.keys()][index] ?? null;
+		},
+		getItem(key: string) {
+			return map.get(key) ?? null;
+		},
+		setItem(key: string, value: string) {
+			map.set(key, value);
+		},
+		removeItem(key: string) {
+			map.delete(key);
+		},
+	};
+}

@@ -7,7 +7,7 @@ export interface OperationInfo {
 	/** The operation type */
 	type: OperationType;
 	/** The operation name, if any */
-	name?: string;
+	name?: string | undefined;
 }
 
 /**
@@ -167,7 +167,9 @@ export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Pr
  */
 export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortScope {
 	const controller = new AbortController();
-	const timer = timeout === undefined || timeout === Infinity ? undefined : setTimeout(abortOnTimeout, timeout);
+	// Only finite, positive timeouts arm a timer: `0`, `Infinity` and `NaN` mean "no timeout".
+	const timer =
+		timeout !== undefined && timeout > 0 && timeout < Infinity ? setTimeout(abortOnTimeout, timeout) : undefined;
 
 	/**
 	 * Aborts with the same `TimeoutError` reason `AbortSignal.timeout` would produce.

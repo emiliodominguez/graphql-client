@@ -35,6 +35,15 @@
 
 ### Fixed
 
+- **Security (docs):** the SSR guide shared one cache across users while varying the auth token, which could serve one user's data to another. It now uses one cache per request, and `extend()` warns about it.
+- A truncated or timed-out `multipart/mixed` response (`hasNext` still true) now rejects instead of resolving partial data and caching it.
+- `no-cache` live queries no longer write the cache on refetch, poll or `fetchMore`. `cache-only` live queries no longer hit the network after an invalidation.
+- `extract()` no longer loops forever with caches whose `keys()` returns a live iterator.
+- `retry.attempts: NaN` no longer retries indefinitely. A `timeout` of `0` or a non-finite value disables the timeout instead of aborting at once. `StorageCache` rejects a `NaN` TTL.
+- `subscribe()` no longer yields the same merged result twice for a trailing `completed` payload.
+- Only network failures raised by `fetch` are retried by default. Invalid URLs and bodies consumed by middleware fail fast.
+- A failing persisted-query hash, for example with no `crypto.subtle` on insecure origins, falls back to sending the full document.
+- Public option types accept explicit `undefined` (`exactOptionalPropertyTypes`), and the library itself compiles with that flag.
 - An invalidation now supersedes requests already in flight: they no longer repopulate the cache, and refetches never join them.
 - `fetchMore` results are no longer overwritten by an older refetch that resolves later.
 - The ordering model is now last-applied-wins per cache key. `no-cache` requests no longer interfere with cache writes, an aborted newer request no longer discards an older success, and cache-writing and `no-cache` requests are never deduplicated together.

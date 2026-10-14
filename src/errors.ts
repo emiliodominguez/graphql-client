@@ -7,13 +7,13 @@ export interface ClientErrorDetails {
 	/** HTTP status code of the response, or `0` for non-HTTP transports (e.g. WebSocket) */
 	status: number;
 	/** GraphQL errors returned by the server, if any */
-	errors?: ReadonlyArray<GraphQLFormattedError>;
+	errors?: ReadonlyArray<GraphQLFormattedError> | undefined;
 	/** Partial data returned alongside the errors, if any */
-	data?: unknown;
+	data?: unknown | undefined;
 	/** The raw fetch Response, absent for non-HTTP transports */
-	response?: Response;
+	response?: Response | undefined;
 	/** Underlying error (e.g. a JSON parse failure) */
-	cause?: unknown;
+	cause?: unknown | undefined;
 }
 
 /**

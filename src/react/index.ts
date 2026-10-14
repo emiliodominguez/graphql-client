@@ -47,7 +47,7 @@ interface SuspenseEntry {
 	/** Resolves once `ref` has data or failed, thrown to suspend */
 	promise: Promise<void>;
 	/** Failure of the initial load, thrown to the nearest error boundary */
-	error?: unknown;
+	error?: unknown | undefined;
 	/** Whether the initial load failed */
 	failed: boolean;
 }
@@ -64,7 +64,7 @@ export interface GraphQLProviderProps {
 	/** The client exposed to the tree */
 	client: Client;
 	/** The tree */
-	children?: ReactNode;
+	children?: ReactNode | undefined;
 }
 
 /**
@@ -75,12 +75,12 @@ export interface GraphQLProviderProps {
  */
 export interface UseQueryOptions<TData, TVariables> extends WatchOptions<TData, TVariables> {
 	/** Skip the query entirely (no fetch, no subscription) */
-	skip?: boolean;
+	skip?: boolean | undefined;
 	/**
 	 * While the variables (or document) change, keep showing the previous data until the new data arrives,
 	 * instead of an empty loading state. `isPreviousData` tells when it is shown.
 	 */
-	keepPreviousData?: boolean;
+	keepPreviousData?: boolean | undefined;
 }
 
 /**
@@ -141,9 +141,9 @@ export type MutateFunction<TData, TVariables> = (
  */
 export interface UseSubscriptionOptions<TData, TVariables> extends Omit<SubscribeOptions<TData, TVariables>, "signal"> {
 	/** Do not connect */
-	skip?: boolean;
+	skip?: boolean | undefined;
 	/** Called for every payload (latest closure is always used) */
-	onData?: (data: TData) => void;
+	onData?: ((data: TData) => void) | undefined;
 }
 
 /**

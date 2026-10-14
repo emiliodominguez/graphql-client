@@ -9,7 +9,7 @@
 		"strict": true,
 		"noUncheckedIndexedAccess": true,
 		"noImplicitOverride": true,
-		"exactOptionalPropertyTypes": false,
+		"exactOptionalPropertyTypes": true,
 		"isolatedModules": true,
 		"verbatimModuleSyntax": true,
 		"esModuleInterop": true,

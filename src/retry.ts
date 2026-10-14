@@ -14,6 +14,23 @@ export interface RetryPolicy {
 }
 
 /**
+ * Errors raised by `fetch` itself, as opposed to errors thrown while preparing the request.
+ */
+const networkFailures = new WeakSet<object>();
+
+/**
+ * Marks an error raised by `fetch` as a network failure (retryable by default) and rethrows it.
+ *
+ * @param error - The error thrown by `fetch`
+ * @returns Never: always rethrows
+ */
+export function rethrowNetworkFailure(error: unknown): never {
+	if (error !== null && typeof error === "object") networkFailures.add(error);
+
+	throw error;
+}
+
+/**
  * Upper bound for the default backoff, in milliseconds.
  */
 const MAX_DELAY = 30_000;
@@ -37,7 +54,7 @@ export function resolveRetryPolicy(
 	const { delay } = options;
 
 	return {
-		attempts: options.attempts ?? 2,
+		attempts: toCount(options.attempts ?? 2),
 		delay: typeof delay === "function" ? delay : delay === undefined ? defaultDelay : constant(delay),
 		retryIf: options.retryIf ?? isRetryable,
 	};
@@ -53,8 +70,9 @@ export function resolveRetryPolicy(
 export function isRetryable(error: unknown, context: OperationContext): boolean {
 	if (context.type !== "query") return false;
 
-	// `fetch` rejects with a TypeError on network failures in every runtime.
-	if (error instanceof TypeError) return true;
+	// `fetch` rejects with a TypeError on network failures in every runtime. Other TypeErrors (an invalid URL,
+	// a body already read by middleware) are deterministic and would fail again.
+	if (error instanceof TypeError) return networkFailures.has(error);
 
 	return isClientError(error) && (error.status === 408 || error.status === 429 || error.status >= 500);
 }
@@ -106,4 +124,14 @@ function constant(ms: number): () => number {
 	return function constantDelay(): number {
 		return ms;
 	};
+}
+
+/**
+ * Normalizes a retry count: invalid values (e.g. `NaN` from an unset environment variable) mean no retries.
+ *
+ * @param value - The configured count
+ * @returns A non-negative integer
+ */
+function toCount(value: number): number {
+	return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }

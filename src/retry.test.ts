@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClientError } from "./errors";
-import { isRetryable, parseRetryAfter, resolveRetryPolicy } from "./retry";
+import { isRetryable, parseRetryAfter, resolveRetryPolicy, rethrowNetworkFailure } from "./retry";
 import type { OperationContext } from "./types";
 
 const QUERY: OperationContext = { type: "query", query: "{ a }", attempt: 0 };
@@ -14,7 +14,27 @@ const MUTATION: OperationContext = { type: "mutation", query: "mutation { a }", 
  * @returns The error
  */
 function httpError(status: number, headers?: HeadersInit): ClientError {
-	return new ClientError(`HTTP ${status}`, { status, response: new Response(null, { status, headers }) });
+	return new ClientError(`HTTP ${status}`, {
+		status,
+		response: new Response(null, headers ? { status, headers } : { status }),
+	});
+}
+
+/**
+ * Creates a TypeError marked as raised by `fetch`.
+ *
+ * @returns The error
+ */
+function networkFailure(): TypeError {
+	const error = new TypeError("fetch failed");
+
+	try {
+		rethrowNetworkFailure(error);
+	} catch {
+		// Marked.
+	}
+
+	return error;
 }
 
 describe("resolveRetryPolicy", function () {
@@ -78,7 +98,8 @@ describe("resolveRetryPolicy", function () {
 
 describe("isRetryable", function () {
 	it.each([
-		[new TypeError("fetch failed"), true],
+		[networkFailure(), true],
+		[new TypeError("Failed to parse URL"), false],
 		[httpError(408), true],
 		[httpError(429), true],
 		[httpError(500), true],
@@ -92,7 +113,7 @@ describe("isRetryable", function () {
 	});
 
 	it("never retries mutations", function () {
-		expect(isRetryable(new TypeError("fetch failed"), MUTATION)).toBe(false);
+		expect(isRetryable(networkFailure(), MUTATION)).toBe(false);
 		expect(isRetryable(httpError(503), MUTATION)).toBe(false);
 	});
 });

@@ -12,7 +12,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	/**
 	 * Resolves the pending `next()` call, if any.
 	 */
-	private wake?: () => void;
+	private wake?: (() => void) | undefined;
 
 	/**
 	 * Failure to throw once the buffer drains.

@@ -151,7 +151,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @returns The resulting state
 	 */
 	async refetch(): Promise<QueryState<TData>> {
-		return this.fetch("network-only");
+		return this.fetch(this.refreshPolicy());
 	}
 
 	/**
@@ -182,7 +182,9 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 			const merged = this.state.data === undefined ? next : options.merge(this.state.data, next);
 
-			await this.host.write(merged);
+			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.
+			if (this.options.fetchPolicy !== "no-cache") await this.host.write(merged);
+
 			this.setState({ data: merged, error: undefined, loading: false });
 		} catch (error) {
 			if (version === this.version) this.setState({ data: this.state.data, error, loading: false });
@@ -242,7 +244,9 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		const missing = trustsCache ? cached === undefined : this.state.data === undefined;
 
 		if (missing || this.stale || fetchPolicy === "network-only") {
-			void this.fetch(this.stale || fetchPolicy === "network-only" ? "network-only" : (fetchPolicy ?? "cache-first"));
+			void this.fetch(
+				this.stale || fetchPolicy === "network-only" ? this.refreshPolicy() : (fetchPolicy ?? "cache-first"),
+			);
 		}
 
 		if (pollInterval) {
@@ -292,6 +296,18 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		this.teardowns.push(function removeListener(): void {
 			target.removeEventListener(type, handle);
 		});
+	}
+
+	/**
+	 * Policy for refetches (manual, polling, focus, reconnect, invalidation): bypass the cache read, unless the
+	 * query must not touch the network (`cache-only`) or the cache (`no-cache`).
+	 *
+	 * @returns The fetch policy
+	 */
+	private refreshPolicy(): FetchPolicy {
+		const { fetchPolicy } = this.options;
+
+		return fetchPolicy === "cache-only" || fetchPolicy === "no-cache" ? fetchPolicy : "network-only";
 	}
 
 	/**

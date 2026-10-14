@@ -11,7 +11,10 @@ export type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem" | "
 export interface StorageCacheConfiguration {
 	/** Backing storage. Defaults to `globalThis.localStorage`. */
 	storage: StorageLike;
-	/** Namespace prepended to every key, so the cache never touches unrelated entries. Defaults to `"gql:"`. */
+	/**
+	 * Namespace prepended to every key, so the cache never touches unrelated entries. Defaults to `"gql:"`.
+	 * Namespaces must not nest: with `"gql:"` and `"gql:admin:"`, clearing the first would clear the second.
+	 */
 	prefix: string;
 	/** Time-to-live in milliseconds. Use `Infinity` to disable expiration. Defaults to 24 hours. */
 	ttl: number;
@@ -41,13 +44,20 @@ export class StorageCache implements Cache {
 	/**
 	 * @param configuration - Optional configuration overrides
 	 * @throws {Error} When no storage is available and none is provided
+	 * @throws {RangeError} When `ttl` is negative or `NaN`
 	 */
 	constructor(configuration?: Partial<StorageCacheConfiguration>) {
 		const storage = configuration?.storage ?? globalThis.localStorage;
 
 		if (!storage) throw new Error("StorageCache: no storage available. Pass one through the `storage` option.");
 
-		this.configuration = { storage, prefix: configuration?.prefix ?? "gql:", ttl: configuration?.ttl ?? 86_400_000 };
+		const ttl = configuration?.ttl ?? 86_400_000;
+
+		if (Number.isNaN(ttl) || ttl < 0) {
+			throw new RangeError(`StorageCache: "ttl" must be a non-negative number. Received ${ttl}.`);
+		}
+
+		this.configuration = { storage, prefix: configuration?.prefix ?? "gql:", ttl };
 	}
 
 	/**

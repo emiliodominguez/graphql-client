@@ -434,7 +434,7 @@ describe("useSubscription", function () {
 
 				if (!keepOpen) controller.close();
 			},
-			cancel: onCancel,
+			...(onCancel ? { cancel: onCancel } : {}),
 		});
 
 		return new Response(body, { headers: { "Content-Type": "text/event-stream" } });

@@ -10,24 +10,24 @@ type Path = ReadonlyArray<string | number>;
  * One entry of an `incremental` list. Supports both the 2022 format (`path`) and the current one (`id` + `subPath`).
  */
 interface IncrementalItem {
-	id?: string;
-	path?: Path;
-	subPath?: Path;
-	data?: Record<string, unknown> | null;
-	items?: unknown[];
-	errors?: ReadonlyArray<GraphQLFormattedError>;
+	id?: string | undefined;
+	path?: Path | undefined;
+	subPath?: Path | undefined;
+	data?: Record<string, unknown> | null | undefined;
+	items?: unknown[] | undefined;
+	errors?: ReadonlyArray<GraphQLFormattedError> | undefined;
 }
 
 /**
  * An initial or subsequent incremental delivery payload. A plain GraphQL response is a valid payload too.
  */
 export interface IncrementalPayload {
-	data?: unknown;
-	errors?: ReadonlyArray<GraphQLFormattedError>;
-	hasNext?: boolean;
-	pending?: ReadonlyArray<{ id: string; path: Path }>;
-	incremental?: ReadonlyArray<IncrementalItem>;
-	completed?: ReadonlyArray<{ id: string; errors?: ReadonlyArray<GraphQLFormattedError> }>;
+	data?: unknown | undefined;
+	errors?: ReadonlyArray<GraphQLFormattedError> | undefined;
+	hasNext?: boolean | undefined;
+	pending?: ReadonlyArray<{ id: string; path: Path }> | undefined;
+	incremental?: ReadonlyArray<IncrementalItem> | undefined;
+	completed?: ReadonlyArray<{ id: string; errors?: ReadonlyArray<GraphQLFormattedError> }> | undefined;
 }
 
 /**
