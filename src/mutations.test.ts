@@ -234,3 +234,138 @@ describe("onError", function () {
 		expect(onError.mock.calls[1]![1]).toMatchObject({ type: "subscription", name: "S" });
 	});
 });
+
+describe("optimistic layers (concurrency)", function () {
+	/**
+	 * Server whose mutations are released manually; titles starting with "boom" fail.
+	 *
+	 * @returns The fetch mock, release functions (in call order) and server state
+	 */
+	function gatedMutations() {
+		const todos = ["a"];
+		const releases: Array<() => void> = [];
+		const fetchMock = vi.fn<typeof fetch>(async function (input) {
+			const { query, variables } = await (input as Request).clone().json();
+
+			if (!query.startsWith("mutation")) return Response.json({ data: { todos: [...todos] } });
+
+			await new Promise<void>(function (resolve) {
+				releases.push(resolve);
+			});
+
+			if (variables.title.startsWith("boom")) return Response.json({ errors: [{ message: "rejected" }] });
+
+			todos.push(variables.title);
+
+			return Response.json({ data: { add: true } });
+		});
+
+		return { fetchMock, releases, todos };
+	}
+
+	/**
+	 * Fires a mutation with an optimistic append.
+	 *
+	 * @param client - The client
+	 * @param title - The todo title
+	 * @returns The settled outcome
+	 */
+	function add(client: Client, title: string): Promise<unknown> {
+		return client.gql({ query: ADD, variables: { title }, optimistic: [append(title)] }).catch(function (
+			error: unknown,
+		) {
+			return error;
+		});
+	}
+
+	it("rolls back only the failed layer when two optimistic mutations fail", async function () {
+		const { fetchMock, releases } = gatedMutations();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const first = add(client, "boom1");
+		const second = add(client, "boom2");
+
+		await tick();
+		expect(await client.read(TARGET)).toEqual({ todos: ["a", "boom1", "boom2"] });
+
+		releases[0]!();
+		await first;
+		expect(await client.read(TARGET)).toEqual({ todos: ["a", "boom2"] });
+
+		releases[1]!();
+		await second;
+		expect(await client.read(TARGET)).toEqual({ todos: ["a"] });
+	});
+
+	it("keeps a newer success when an older optimistic mutation fails", async function () {
+		const { fetchMock, releases } = gatedMutations();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		const failing = add(client, "boom");
+		const succeeding = add(client, "b");
+
+		await tick();
+		releases[0]!();
+		await failing;
+		expect(await client.read(TARGET)).toEqual({ todos: ["a", "b"] });
+
+		releases[1]!();
+		await succeeding;
+		expect(await client.read(TARGET)).toEqual({ todos: ["a", "b"] });
+	});
+
+	it("rebases pending layers on fresh server data and rolls back onto it", async function () {
+		const { fetchMock, releases, todos } = gatedMutations();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+		const ref = client.watch(TARGET);
+		const stop = ref.subscribe(function () {});
+
+		await tick();
+
+		const pending = add(client, "boom");
+
+		await tick();
+		todos.push("fromServer");
+		await client.invalidate(["todos"]);
+		await tick();
+
+		expect(ref.getState().data).toEqual({ todos: ["a", "fromServer", "boom"] });
+
+		releases[0]!();
+		await pending;
+
+		expect(ref.getState().data).toEqual({ todos: ["a", "fromServer"] });
+		expect(await client.read(TARGET)).toEqual({ todos: ["a", "fromServer"] });
+		stop();
+	});
+
+	it("rolls back earlier updates when a later update throws, and reports it", async function () {
+		const { fetchMock } = gatedMutations();
+		const onError = vi.fn();
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache(), onError });
+		const OTHER = { key: ["other"], query: "query Other { other }" };
+
+		await client.write(TARGET, { todos: ["a"] });
+
+		await expect(
+			client.gql({
+				query: ADD,
+				variables: { title: "b" },
+				optimistic: [
+					append("b"),
+					optimistic(OTHER, function (current: { other: string[] } | undefined) {
+						return { other: [...current!.other] };
+					}),
+				],
+			}),
+		).rejects.toBeInstanceOf(TypeError);
+
+		expect(await client.read(TARGET)).toEqual({ todos: ["a"] });
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(onError).toHaveBeenCalledTimes(1);
+	});
+});

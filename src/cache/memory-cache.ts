@@ -30,12 +30,12 @@ export class MemoryCache implements Cache {
 	/**
 	 * Entries in LRU order (oldest first).
 	 */
-	private readonly entries = new Map<string, Entry>();
+	readonly #entries = new Map<string, Entry>();
 
 	/**
 	 * Resolved configuration.
 	 */
-	private readonly configuration: MemoryCacheConfiguration;
+	readonly #configuration: MemoryCacheConfiguration;
 
 	/**
 	 * @param configuration - Optional configuration overrides
@@ -53,14 +53,14 @@ export class MemoryCache implements Cache {
 			throw new RangeError(`MemoryCache: "maxSize" must be a positive integer. Received ${maxSize}.`);
 		}
 
-		this.configuration = { ttl, maxSize };
+		this.#configuration = { ttl, maxSize };
 	}
 
 	/**
 	 * Number of stored entries, including expired ones not yet pruned.
 	 */
 	get size(): number {
-		return this.entries.size;
+		return this.#entries.size;
 	}
 
 	/**
@@ -71,15 +71,15 @@ export class MemoryCache implements Cache {
 	 * @returns The value, or `undefined` on a miss or when expired
 	 */
 	get<T>(key: string): T | undefined {
-		const entry = this.entries.get(key);
+		const entry = this.#entries.get(key);
 
 		if (!entry) return undefined;
 
-		this.entries.delete(key);
+		this.#entries.delete(key);
 
-		if (this.isExpired(entry)) return undefined;
+		if (this.#isExpired(entry)) return undefined;
 
-		this.entries.set(key, entry);
+		this.#entries.set(key, entry);
 
 		return entry.value as T;
 	}
@@ -92,11 +92,11 @@ export class MemoryCache implements Cache {
 	 * @param value - The value to store
 	 */
 	set<T>(key: string, value: T): void {
-		this.entries.delete(key);
-		this.entries.set(key, { value, expiresAt: Date.now() + this.configuration.ttl });
+		this.#entries.delete(key);
+		this.#entries.set(key, { value, expiresAt: Date.now() + this.#configuration.ttl });
 
-		if (this.entries.size > this.configuration.maxSize) {
-			this.entries.delete(this.entries.keys().next().value as string);
+		if (this.#entries.size > this.#configuration.maxSize) {
+			this.#entries.delete(this.#entries.keys().next().value as string);
 		}
 	}
 
@@ -107,9 +107,9 @@ export class MemoryCache implements Cache {
 	 * @returns `true` when a non-expired entry exists
 	 */
 	has(key: string): boolean {
-		const entry = this.entries.get(key);
+		const entry = this.#entries.get(key);
 
-		return entry !== undefined && !this.isExpired(entry);
+		return entry !== undefined && !this.#isExpired(entry);
 	}
 
 	/**
@@ -119,14 +119,14 @@ export class MemoryCache implements Cache {
 	 * @returns `true` when an entry was removed
 	 */
 	delete(key: string): boolean {
-		return this.entries.delete(key);
+		return this.#entries.delete(key);
 	}
 
 	/**
 	 * Removes every entry.
 	 */
 	clear(): void {
-		this.entries.clear();
+		this.#entries.clear();
 	}
 
 	/**
@@ -137,9 +137,9 @@ export class MemoryCache implements Cache {
 	keys(): string[] {
 		const keys: string[] = [];
 
-		for (const [key, entry] of this.entries) {
-			if (this.isExpired(entry)) {
-				this.entries.delete(key);
+		for (const [key, entry] of this.#entries) {
+			if (this.#isExpired(entry)) {
+				this.#entries.delete(key);
 			} else {
 				keys.push(key);
 			}
@@ -154,7 +154,7 @@ export class MemoryCache implements Cache {
 	 * @param entry - The cache entry
 	 * @returns `true` when expired
 	 */
-	private isExpired(entry: Entry): boolean {
+	#isExpired(entry: Entry): boolean {
 		return Date.now() >= entry.expiresAt;
 	}
 }

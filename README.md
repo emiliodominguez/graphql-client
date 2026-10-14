@@ -172,7 +172,7 @@ await client.gql({
 ```
 
 - `optimistic(target, update)` infers types from the target's document. `current` is the cached data, or a live query's data when there's no cache.
-- On failure, previous data is restored, newest update first. An entry that didn't exist before is dropped, and its watchers refetch.
+- Updates are layers on top of the real data. Server responses and refetches arriving meanwhile rebase them, a failure removes only its own layer, and a success keeps it. Concurrent optimistic mutations never clobber each other. An entry left without data is dropped, and its watchers refetch.
 - `useMutation(ADD_TODO, { optimistic: [...] })` works the same way.
 - `read` and `write` are available for fully manual updates. `write` notifies every watcher of the entry.
 

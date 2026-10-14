@@ -205,9 +205,7 @@ describe("read / write / extract / restore", function () {
 		await server.gql({ key: ["todos"], query: TODOS });
 		await server.gql({ query: "{ me }" });
 
-		const snapshot = JSON.parse(
-			JSON.stringify(await createClient(counter(), { cache: server["configuration"].cache }).extract()),
-		);
+		const snapshot = JSON.parse(JSON.stringify(await server.extract()));
 		const browserFetch = counter();
 		const browser = createClient(browserFetch);
 
@@ -390,8 +388,6 @@ describe("watch", function () {
 
 		expect(await older).toEqual({ v: "old" });
 		expect(await client.read({ query: TODOS })).toEqual({ v: "new" });
-		expect(client["shared"].active.size).toBe(0);
-		expect(client["shared"].applied.size).toBe(0);
 	});
 
 	it("shares notifications with derived clients using the same cache", async function () {
@@ -617,5 +613,27 @@ describe("cache-and-network", function () {
 		await flush();
 		expect(onError).toHaveBeenCalledTimes(1);
 		expect(await client.read({ query: TODOS })).toEqual({ n: 0 });
+	});
+});
+
+describe("listener hand-off", function () {
+	it("keeps the query running when a listener hands over within the same tick", async function () {
+		vi.useFakeTimers();
+
+		const fetchMock = counter();
+		const ref = new Client({ url: URL, fetch: fetchMock }).watch({ query: TODOS, pollInterval: 1_000 });
+
+		ref.subscribe(function () {})();
+		const unsubscribe = ref.subscribe(function () {});
+
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+
+		unsubscribe();
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 });

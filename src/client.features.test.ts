@@ -585,3 +585,44 @@ describe("strict persisted queries", function () {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });
+
+describe("strict persisted subscriptions", function () {
+	it("never sends the document over HTTP streams or custom transports", async function () {
+		const fetchMock = sequence(function () {
+			return eventStream(['event: next\ndata: {"data":{"s":1}}\n\n', "event: complete\n\n"]);
+		});
+		const requests: unknown[] = [];
+		const persistedQueries = {
+			strict: true,
+			hash() {
+				return "h";
+			},
+		};
+		const client = createClient(fetchMock, { persistedQueries });
+
+		for await (const _ of client.subscribe({ query: "subscription S { s }" })) {
+			// drain
+		}
+
+		const transported = createClient(fetchMock, {
+			persistedQueries,
+			subscriptionTransport: {
+				async *subscribe(request) {
+					requests.push(request);
+					yield { data: { s: 1 } };
+				},
+			},
+		});
+
+		for await (const _ of transported.subscribe({ query: "subscription S { s }" })) {
+			// drain
+		}
+
+		const body = await requestOf(fetchMock).json();
+
+		expect(body).not.toHaveProperty("query");
+		expect(body.extensions.persistedQuery.sha256Hash).toBe("h");
+		expect(requests[0]).not.toHaveProperty("query");
+		expect(requests[0]).toMatchObject({ extensions: { persistedQuery: { sha256Hash: "h" } } });
+	});
+});

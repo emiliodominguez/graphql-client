@@ -150,8 +150,10 @@ export interface ClientConfiguration {
  * The operation sent through a {@link SubscriptionTransport}.
  */
 export interface SubscriptionRequest {
-	/** The GraphQL document */
-	query: string;
+	/** The GraphQL document. Absent with strict persisted queries, which only send `extensions.persistedQuery`. */
+	query?: string | undefined;
+	/** Protocol extensions (e.g. `persistedQuery`) */
+	extensions?: Record<string, unknown> | undefined;
 	/** Operation variables */
 	variables?: unknown | undefined;
 	/** The selected operation name */
@@ -375,19 +377,39 @@ export interface FetchMoreOptions<TData, TVariables> {
 }
 
 /**
- * Keys of `T` that are not optional.
+ * Keys of `T` that are not optional. Distributes over unions: a key required by any member counts.
  *
  * @template T - An object type
  */
-export type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
+export type RequiredKeys<T> = T extends unknown ? { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T] : never;
+
+/**
+ * Blocks inference from a position (like TypeScript 5.4's `NoInfer`, compatible with older compilers).
+ *
+ * @template T - The type
+ */
+export type NoInference<T> = [T][T extends unknown ? 0 : never];
 
 /**
  * Makes `variables` required on `TOptions` when the document declares required variables, so forgetting them is a
  * compile error. Documents without variables (or with only optional ones) keep `variables` optional.
+ * Variables are not inferred from the `variables` property itself, so passing `undefined` cannot erase the
+ * requirement.
  *
  * @template TOptions - The options type
  * @template TVariables - The shape of the operation variables
  */
 export type WithVariables<TOptions, TVariables> = [RequiredKeys<TVariables>] extends [never]
 	? TOptions
-	: TOptions & { variables: TVariables };
+	: TOptions & { variables: NoInference<TVariables> };
+
+/**
+ * Like {@link WithVariables} for options that can be skipped (`skip: true`): `variables` must be present but may be
+ * `undefined`, for the `variables: id ? { id } : undefined, skip: !id` pattern.
+ *
+ * @template TOptions - The options type
+ * @template TVariables - The shape of the operation variables
+ */
+export type WithSkippableVariables<TOptions, TVariables> = [RequiredKeys<TVariables>] extends [never]
+	? TOptions
+	: TOptions & { variables: NoInference<TVariables> | undefined };

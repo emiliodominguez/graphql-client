@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- Optimistic updates are layered. Each update sits on top of the entry's real data. Responses, writes and refetches rebase the pending layers, a failure removes only its own layer, and a success folds it into the real data. Concurrent optimistic mutations, refetches and invalidations no longer clobber each other.
+- An optimistic `update` that throws rolls back the layers already applied and is reported to `onError`.
+- `useLazyQuery` drives its own live query: one request and one `onError` per execution, whatever the dedupe settings or the fetch policy.
+- Strict persisted queries also cover `subscribe()`, including HTTP streaming and custom transports.
+- `keepPreviousData` never shows stale data while the query is skipped.
+- Required-variables types: union variables are checked, and `variables: undefined` no longer bypasses the requirement. Hooks with `skip` accept possibly-undefined variables.
+- Live queries defer deactivation by a tick, so hand-offs (StrictMode remounts, a promise handing over to a component) keep the query running instead of refetching.
 - **Security (docs):** the SSR guide shared one cache across users while varying the auth token, which could serve one user's data to another. It now uses one cache per request, and `extend()` warns about it.
 - A truncated or timed-out `multipart/mixed` response (`hasNext` still true) now rejects instead of resolving partial data and caching it.
 - `no-cache` live queries no longer write the cache on refetch, poll or `fetchMore`. `cache-only` live queries no longer hit the network after an invalidation.
@@ -63,6 +70,8 @@
 
 ### Changed
 
+- The build targets ES2022. Internals use native `#private` fields: truly private at runtime, and minified for a smaller bundle. This requires Node 20+ and browsers from 2021 or later.
+- `SubscriptionRequest.query` is optional and `extensions` was added. Strict persisted queries send only `extensions.persistedQuery`.
 - Clients that share a cache (for example via `extend()`) now also share live-query notifications and last-request-wins ordering.
 - `ClientError.response` is now optional, and `status` is `0` for non-HTTP transports.
 - **Breaking:** the per-call `cache?: boolean` option is replaced by `fetchPolicy`. Use `"no-cache"` for `cache: false` and `"cache-first"` for `cache: true`.

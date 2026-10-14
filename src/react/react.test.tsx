@@ -751,3 +751,70 @@ describe("useLazyQuery", function () {
 		expect(screen.getByTestId("lazy").textContent).toBe("true:false:live");
 	});
 });
+
+describe("review 3", function () {
+	it("useLazyQuery makes exactly one request per execution, even without dedupe", async function () {
+		const onError = vi.fn();
+
+		for (const configuration of [{ dedupe: false }, { fetchPolicy: "cache-only" as const }]) {
+			const { client, fetchMock } = setup({ dedupe: false, onError });
+			const lazyOptions = "fetchPolicy" in configuration ? configuration : { headers: { "X-A": "1" }, timeout: 5_000 };
+			let execute!: () => Promise<unknown>;
+
+			/**
+			 * Captures the execute function.
+			 *
+			 * @returns Nothing
+			 */
+			function Lazy() {
+				[execute] = useLazyQuery(TODOS, lazyOptions);
+				return null;
+			}
+
+			render(
+				<GraphQLProvider client={client}>
+					<Lazy />
+				</GraphQLProvider>,
+			);
+
+			await act(async function () {
+				await execute().catch(function () {});
+			});
+
+			expect(fetchMock).toHaveBeenCalledTimes("fetchPolicy" in configuration ? 0 : 1);
+			cleanup();
+		}
+
+		expect(onError).toHaveBeenCalledTimes(1);
+	});
+
+	it("keepPreviousData never shows stale data while skipped", async function () {
+		const { wrapper } = setup();
+		let setSkip!: (skip: boolean) => void;
+
+		/**
+		 * Skippable list.
+		 *
+		 * @returns The element
+		 */
+		function Skippable() {
+			const [skip, set] = useState(false);
+			const { data, isPreviousData } = useQuery<{ todos: string[] }>({ query: TODOS, skip, keepPreviousData: true });
+
+			setSkip = set;
+
+			return <span data-testid="skippable">{`${data?.todos.join(",") ?? "-"}:${isPreviousData}`}</span>;
+		}
+
+		render(<Skippable />, { wrapper });
+		await waitFor(function () {
+			expect(screen.getByTestId("skippable").textContent).toBe("a:false");
+		});
+
+		await act(async function () {
+			setSkip(true);
+		});
+
+		expect(screen.getByTestId("skippable").textContent).toBe("-:false");
+	});
+});

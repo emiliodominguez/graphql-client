@@ -7,22 +7,22 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	/**
 	 * Buffered values.
 	 */
-	private readonly values: T[] = [];
+	readonly #values: T[] = [];
 
 	/**
 	 * Resolves the pending `next()` call, if any.
 	 */
-	private wake?: (() => void) | undefined;
+	#wake?: (() => void) | undefined;
 
 	/**
 	 * Failure to throw once the buffer drains.
 	 */
-	private failure?: { error: unknown };
+	#failure?: { error: unknown };
 
 	/**
 	 * Whether the queue ended.
 	 */
-	private ended = false;
+	#ended = false;
 
 	/**
 	 * Adds a value.
@@ -30,10 +30,10 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	 * @param value - The value
 	 */
 	push(value: T): void {
-		if (this.ended) return;
+		if (this.#ended) return;
 
-		this.values.push(value);
-		this.notify();
+		this.#values.push(value);
+		this.#notify();
 	}
 
 	/**
@@ -42,9 +42,9 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	 * @param error - The failure
 	 */
 	fail(error: unknown): void {
-		if (this.ended) return;
+		if (this.#ended) return;
 
-		this.failure = { error };
+		this.#failure = { error };
 		this.end();
 	}
 
@@ -52,8 +52,8 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	 * Ends the queue after buffered values.
 	 */
 	end(): void {
-		this.ended = true;
-		this.notify();
+		this.#ended = true;
+		this.#notify();
 	}
 
 	/**
@@ -63,18 +63,18 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	 */
 	async *[Symbol.asyncIterator](): AsyncGenerator<T> {
 		while (true) {
-			if (this.values.length > 0) {
-				yield this.values.shift()!;
+			if (this.#values.length > 0) {
+				yield this.#values.shift()!;
 				continue;
 			}
 
-			if (this.failure) throw this.failure.error;
-			if (this.ended) return;
+			if (this.#failure) throw this.#failure.error;
+			if (this.#ended) return;
 
 			const queue = this;
 
 			await new Promise<void>(function wait(resolve): void {
-				queue.wake = resolve;
+				queue.#wake = resolve;
 			});
 		}
 	}
@@ -82,10 +82,10 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	/**
 	 * Wakes the pending consumer.
 	 */
-	private notify(): void {
-		const wake = this.wake;
+	#notify(): void {
+		const wake = this.#wake;
 
-		this.wake = undefined;
+		this.#wake = undefined;
 		wake?.();
 	}
 }

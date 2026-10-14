@@ -39,7 +39,7 @@ export class StorageCache implements Cache {
 	/**
 	 * Resolved configuration.
 	 */
-	private readonly configuration: StorageCacheConfiguration;
+	readonly #configuration: StorageCacheConfiguration;
 
 	/**
 	 * @param configuration - Optional configuration overrides
@@ -57,7 +57,7 @@ export class StorageCache implements Cache {
 			throw new RangeError(`StorageCache: "ttl" must be a non-negative number. Received ${ttl}.`);
 		}
 
-		this.configuration = { storage, prefix: configuration?.prefix ?? "gql:", ttl };
+		this.#configuration = { storage, prefix: configuration?.prefix ?? "gql:", ttl };
 	}
 
 	/**
@@ -68,7 +68,7 @@ export class StorageCache implements Cache {
 	 * @returns The value, or `undefined` on a miss
 	 */
 	get<T>(key: string): T | undefined {
-		const raw = this.configuration.storage.getItem(this.configuration.prefix + key);
+		const raw = this.#configuration.storage.getItem(this.#configuration.prefix + key);
 
 		if (raw === null) return undefined;
 
@@ -93,7 +93,7 @@ export class StorageCache implements Cache {
 	 * @param value - A JSON-serializable value
 	 */
 	set<T>(key: string, value: T): void {
-		const { ttl, storage, prefix } = this.configuration;
+		const { ttl, storage, prefix } = this.#configuration;
 		const entry: StoredEntry = { v: value, e: ttl === Infinity ? null : Date.now() + ttl };
 
 		try {
@@ -109,7 +109,7 @@ export class StorageCache implements Cache {
 	 * @param key - The cache key
 	 */
 	delete(key: string): void {
-		this.configuration.storage.removeItem(this.configuration.prefix + key);
+		this.#configuration.storage.removeItem(this.#configuration.prefix + key);
 	}
 
 	/**
@@ -125,7 +125,7 @@ export class StorageCache implements Cache {
 	 * @returns The keys, without the prefix
 	 */
 	keys(): string[] {
-		const { storage, prefix } = this.configuration;
+		const { storage, prefix } = this.#configuration;
 		const keys: string[] = [];
 
 		for (let index = 0; index < storage.length; index++) {

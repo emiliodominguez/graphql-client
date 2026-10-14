@@ -21,6 +21,7 @@ import type {
 	RequiredKeys,
 	TypedDocumentString,
 	WatchOptions,
+	WithSkippableVariables,
 	WithVariables,
 } from "../types";
 import { stableStringify } from "../utils";
@@ -207,33 +208,11 @@ export function useClient(): Client {
  * @returns The query state and `refetch`
  */
 export function useQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
-	options: WithVariables<UseQueryOptions<TData, TVariables>, TVariables>,
+	options: WithSkippableVariables<UseQueryOptions<TData, TVariables>, TVariables>,
 ): UseQueryResult<TData, TVariables> {
 	const ref = useQueryRef(options);
-	const skip = options.skip === true;
-	const state = useSyncExternalStore<QueryState<TData>>(
-		skip ? subscribeNothing : ref.subscribe,
-		skip ? getSkippedState : ref.getState,
-		skip ? getSkippedState : ref.getState,
-	);
-	const previousData = useRef<TData | undefined>(undefined);
-	const showPrevious = options.keepPreviousData === true && state.data === undefined && previousData.current !== undefined;
 
-	useEffect(
-		function rememberData(): void {
-			if (state.data !== undefined) previousData.current = state.data;
-		},
-		[state.data],
-	);
-
-	return useMemo(
-		function createResult(): UseQueryResult<TData, TVariables> {
-			const data = showPrevious ? previousData.current : state.data;
-
-			return { ...state, data, isPreviousData: showPrevious, refetch: ref.refetch, fetchMore: ref.fetchMore };
-		},
-		[state, ref, showPrevious],
-	);
+	return useQueryRefResult(options.skip === true ? undefined : ref, options.keepPreviousData === true);
 }
 
 /**
@@ -396,25 +375,22 @@ export function useLazyQuery<TData = unknown, TVariables extends object = Record
 	options?: Omit<UseQueryOptions<TData, TVariables>, "query" | "variables" | "skip">,
 ): [LazyQueryExecute<TData, TVariables>, UseLazyQueryResult<TData, TVariables>] {
 	const client = useClient();
-	const [execution, setExecution] = useState<{ variables: TVariables | undefined } | undefined>(undefined);
 	const latestOptions = useLatest(options);
-	const result = useQuery<TData, TVariables>({
-		...options,
-		query,
-		variables: execution?.variables,
-		skip: execution === undefined,
-	} as WithVariables<UseQueryOptions<TData, TVariables>, TVariables>);
+	const [ref, setRef] = useState<QueryRef<TData, TVariables> | undefined>(undefined);
+	const result = useQueryRefResult(ref, options?.keepPreviousData === true);
 
 	const execute = useCallback(
 		function execute(variables?: TVariables): Promise<TData> {
-			setExecution({ variables });
-
-			// Shares the live query's request through deduplication, and resolves with this call's data.
-			return client.gql<TData, TVariables>({
+			// The live query performs the request itself: exactly one request (and one onError) per execution.
+			const next = client.watch<TData, TVariables>({
 				...latestOptions.current,
 				query,
 				variables,
-			} as WithVariables<RequestOptions<TData, TVariables>, TVariables>);
+			} as WithVariables<WatchOptions<TData, TVariables>, TVariables>);
+
+			setRef(next);
+
+			return firstSettled(next);
 		},
 		[client, query, latestOptions],
 	);
@@ -423,9 +399,9 @@ export function useLazyQuery<TData = unknown, TVariables extends object = Record
 		execute as LazyQueryExecute<TData, TVariables>,
 		useMemo(
 			function createResult(): UseLazyQueryResult<TData, TVariables> {
-				return { ...result, called: execution !== undefined };
+				return { ...result, called: ref !== undefined };
 			},
-			[result, execution],
+			[result, ref],
 		),
 	];
 }
@@ -440,7 +416,7 @@ export function useLazyQuery<TData = unknown, TVariables extends object = Record
  * @returns The latest payload, error and connection status
  */
 export function useSubscription<TData = unknown, TVariables extends object = Record<string, unknown>>(
-	options: WithVariables<UseSubscriptionOptions<TData, TVariables>, TVariables>,
+	options: WithSkippableVariables<UseSubscriptionOptions<TData, TVariables>, TVariables>,
 ): UseSubscriptionResult<TData> {
 	const client = useClient();
 	const identity = getIdentity(options);
@@ -498,6 +474,95 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 	);
 
 	return state;
+}
+
+/**
+ * Subscribes to a live query (or the idle state when `ref` is undefined) and builds the hook result.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ * @param ref - The live query, or `undefined` when skipped / not executed yet
+ * @param keepPreviousData - Keep showing the last data while a new query loads
+ * @returns The hook result
+ */
+function useQueryRefResult<TData, TVariables>(
+	ref: QueryRef<TData, TVariables> | undefined,
+	keepPreviousData: boolean,
+): UseQueryResult<TData, TVariables> {
+	const state = useSyncExternalStore<QueryState<TData>>(
+		ref ? ref.subscribe : subscribeNothing,
+		ref ? ref.getState : getSkippedState,
+		ref ? ref.getState : getSkippedState,
+	);
+	const previousData = useRef<TData | undefined>(undefined);
+	// Skipped or idle queries show the idle state, never stale data.
+	const showPrevious =
+		keepPreviousData && ref !== undefined && state.data === undefined && previousData.current !== undefined;
+
+	useEffect(
+		function rememberData(): void {
+			if (state.data !== undefined) previousData.current = state.data;
+		},
+		[state.data],
+	);
+
+	return useMemo(
+		function createResult(): UseQueryResult<TData, TVariables> {
+			return {
+				...state,
+				data: showPrevious ? previousData.current : state.data,
+				isPreviousData: showPrevious,
+				refetch: ref ? ref.refetch : resolveIdle,
+				fetchMore: ref ? ref.fetchMore : resolveIdle,
+			};
+		},
+		[state, ref, showPrevious],
+	);
+}
+
+/**
+ * Resolves once a live query settles (not loading), with its data or its error.
+ *
+ * @template TData - The shape of the `data` field
+ * @param ref - The live query
+ * @returns Its data
+ */
+function firstSettled<TData>(ref: QueryRef<TData, unknown>): Promise<TData> {
+	return new Promise<TData>(function wait(resolve, reject): void {
+		let unsubscribe: (() => void) | undefined;
+
+		/**
+		 * Settles on the first state that is not loading.
+		 *
+		 * @param state - The query state
+		 * @returns Whether it settled
+		 */
+		function settle(state: QueryState<TData>): boolean {
+			if (state.loading) return false;
+
+			if (state.error !== undefined || state.data === undefined) reject(state.error);
+			else resolve(state.data);
+
+			unsubscribe?.();
+			return true;
+		}
+
+		// Subscribing activates the query; only then does the state tell whether a fetch is running.
+		unsubscribe = ref.subscribe(function observe(state: QueryState<TData>): void {
+			if (unsubscribe) settle(state);
+		});
+
+		settle(ref.getState());
+	});
+}
+
+/**
+ * `refetch` / `fetchMore` of an idle (skipped or not executed) query.
+ *
+ * @returns The idle state
+ */
+function resolveIdle(): Promise<QueryState<never>> {
+	return Promise.resolve(SKIPPED);
 }
 
 /**

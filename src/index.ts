@@ -33,5 +33,6 @@ export type {
 	SubscriptionTransport,
 	TypedDocumentString,
 	WatchOptions,
+	WithSkippableVariables,
 	WithVariables,
 } from "./types";

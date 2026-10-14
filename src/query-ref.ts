@@ -62,53 +62,78 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	/**
 	 * Current state. Replaced (never mutated) on change, so it can back `useSyncExternalStore`.
 	 */
-	private state: QueryState<TData>;
+	#state: QueryState<TData>;
 
 	/**
 	 * Active listeners.
 	 */
-	private readonly listeners = new Set<QueryListener<TData>>();
+	readonly #listeners = new Set<QueryListener<TData>>();
 
 	/**
 	 * Teardowns for timers and event listeners installed while active.
 	 */
-	private readonly teardowns: Array<() => void> = [];
+	readonly #teardowns: Array<() => void> = [];
 
 	/**
 	 * Incremented per fetch so out-of-order responses are ignored.
 	 */
-	private version = 0;
+	#version = 0;
+
+	/**
+	 * Pending deactivation after the last listener left, cancelled if a listener subscribes meanwhile.
+	 */
+	#deactivation: ReturnType<typeof setTimeout> | undefined;
+
+	/**
+	 * Whether background work (cache registration, timers, event listeners) is installed.
+	 */
+	#active = false;
 
 	/**
 	 * Set when invalidated while active but before a refetch could start.
 	 */
-	private stale = false;
+	#stale = false;
 
 	/**
 	 * Invalidation epoch the current data is fresh as of. Compared on activation to detect missed invalidations.
 	 */
-	private freshAsOf: number;
+	#freshAsOf: number;
 
 	/**
 	 * Whether a fetch ever succeeded (after which `initialData` no longer counts as fresh).
 	 */
-	private fetched = false;
+	#fetched = false;
+
+	/**
+	 * The client bridge.
+	 */
+	readonly #host: QueryHost<TData, TVariables>;
+
+	/**
+	 * Watch options.
+	 */
+	readonly #options: Pick<
+		WatchOptions<TData, unknown>,
+		"fetchPolicy" | "pollInterval" | "refetchOnFocus" | "refetchOnReconnect" | "initialData"
+	>;
 
 	/**
 	 * @param host - The client bridge
 	 * @param options - Watch options
 	 */
 	constructor(
-		private readonly host: QueryHost<TData, TVariables>,
-		private readonly options: Pick<
+		host: QueryHost<TData, TVariables>,
+		options: Pick<
 			WatchOptions<TData, unknown>,
 			"fetchPolicy" | "pollInterval" | "refetchOnFocus" | "refetchOnReconnect" | "initialData"
 		>,
 	) {
+		this.#host = host;
+		this.#options = options;
 		const data = host.peek() ?? options.initialData;
 
-		this.state = { data, error: undefined, loading: data === undefined };
-		this.freshAsOf = host.epoch();
+		this.#state = { data, error: undefined, loading: data === undefined };
+		this.#freshAsOf = host.epoch();
 		this.getState = this.getState.bind(this);
 		this.subscribe = this.subscribe.bind(this);
 		this.refetch = this.refetch.bind(this);
@@ -121,7 +146,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @returns The state
 	 */
 	getState(): QueryState<TData> {
-		return this.state;
+		return this.#state;
 	}
 
 	/**
@@ -132,17 +157,22 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @returns The unsubscribe function
 	 */
 	subscribe(listener: QueryListener<TData>): () => void {
-		if (this.listeners.has(listener)) {
-			listener(this.state);
-			return this.createUnsubscribe(listener);
+		if (this.#listeners.has(listener)) {
+			listener(this.#state);
+			return this.#createUnsubscribe(listener);
 		}
 
-		this.listeners.add(listener);
-		listener(this.state);
+		this.#listeners.add(listener);
+		listener(this.#state);
 
-		if (this.listeners.size === 1) this.activate();
+		clearTimeout(this.#deactivation);
+		this.#deactivation = undefined;
 
-		return this.createUnsubscribe(listener);
+		if (!this.#active) this.#activate();
+		// Resubscribed during the deactivation grace period after an invalidation: catch up now.
+		else if (this.#listeners.size === 1 && this.#stale) void this.refetch();
+
+		return this.#createUnsubscribe(listener);
 	}
 
 	/**
@@ -151,7 +181,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @returns The resulting state
 	 */
 	async refetch(): Promise<QueryState<TData>> {
-		return this.fetch(this.refreshPolicy());
+		return this.#fetch(this.#refreshPolicy());
 	}
 
 	/**
@@ -171,26 +201,26 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 */
 	async fetchMore(options: FetchMoreOptions<TData, TVariables>): Promise<QueryState<TData>> {
 		// Supersedes any in-flight refetch, whose older page must not overwrite the merged result.
-		const version = ++this.version;
+		const version = ++this.#version;
 
-		this.setState({ data: this.state.data, error: undefined, loading: true });
+		this.#setState({ data: this.#state.data, error: undefined, loading: true });
 
 		try {
-			const next = await this.host.fetchMore(options.variables);
+			const next = await this.#host.fetchMore(options.variables);
 
-			if (version !== this.version) return this.state;
+			if (version !== this.#version) return this.#state;
 
-			const merged = this.state.data === undefined ? next : options.merge(this.state.data, next);
+			const merged = this.#state.data === undefined ? next : options.merge(this.#state.data, next);
 
 			// `no-cache` queries never touch the cache: keep the merged pages local to this ref.
-			if (this.options.fetchPolicy !== "no-cache") await this.host.write(merged);
+			if (this.#options.fetchPolicy !== "no-cache") await this.#host.write(merged);
 
-			this.setState({ data: merged, error: undefined, loading: false });
+			this.#setState({ data: merged, error: undefined, loading: false });
 		} catch (error) {
-			if (version === this.version) this.setState({ data: this.state.data, error, loading: false });
+			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
 		}
 
-		return this.state;
+		return this.#state;
 	}
 
 	/**
@@ -199,78 +229,88 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @param listener - The listener to remove
 	 * @returns The unsubscribe function
 	 */
-	private createUnsubscribe(listener: QueryListener<TData>): () => void {
+	#createUnsubscribe(listener: QueryListener<TData>): () => void {
 		const ref = this;
 
 		return function unsubscribe(): void {
-			if (!ref.listeners.delete(listener) || ref.listeners.size > 0) return;
+			if (!ref.#listeners.delete(listener) || ref.#listeners.size > 0) return;
 
-			ref.deactivate();
+			// Deactivate on the next tick: a listener handing over to another (StrictMode remounts, a promise
+			// handing over to a component) keeps the query running instead of tearing it down and refetching.
+			clearTimeout(ref.#deactivation);
+			ref.#deactivation = setTimeout(function deactivateIdle(): void {
+				ref.#deactivation = undefined;
+				if (ref.#listeners.size === 0) ref.#deactivate();
+			}, 0);
 		};
 	}
 
 	/**
 	 * Registers for cache events, fetches when needed and installs background refetch triggers.
 	 */
-	private activate(): void {
+	#activate(): void {
 		const ref = this;
-		const { pollInterval, refetchOnFocus, refetchOnReconnect, fetchPolicy } = this.options;
 
-		this.teardowns.push(
-			this.host.register({
+		this.#active = true;
+		const { pollInterval, refetchOnFocus, refetchOnReconnect, fetchPolicy } = this.#options;
+
+		this.#teardowns.push(
+			this.#host.register({
 				receive(data: TData): void {
-					ref.fetched = true;
-					ref.setState({ data, error: undefined, loading: ref.state.loading });
+					ref.#fetched = true;
+					ref.#setState({ data, error: undefined, loading: ref.#state.loading });
 				},
 				current(): TData | undefined {
-					return ref.state.data;
+					return ref.#state.data;
 				},
 				invalidate(): void {
-					ref.stale = true;
-					if (ref.listeners.size > 0) void ref.refetch();
+					ref.#stale = true;
+					if (ref.#listeners.size > 0) void ref.refetch();
 				},
 			}),
 		);
 
 		// Catch up with anything that happened while inactive: newer cached data, invalidation or expiry.
-		const cached = this.host.peek();
+		const cached = this.#host.peek();
 
-		if (cached !== undefined) this.setState({ data: cached, error: this.state.error, loading: this.state.loading });
+		if (cached !== undefined) this.#setState({ data: cached, error: this.#state.error, loading: this.#state.loading });
 
-		if (this.host.invalidatedSince(this.freshAsOf)) this.stale = true;
+		if (this.#host.invalidatedSince(this.#freshAsOf)) this.#stale = true;
 
 		// `initialData` stands in for the cache only until the first fetch.
-		const trustsCache = this.host.hasCache() && (this.options.initialData === undefined || this.fetched);
-		const missing = trustsCache ? cached === undefined : this.state.data === undefined;
+		const trustsCache = this.#host.hasCache() && (this.#options.initialData === undefined || this.#fetched);
+		const missing = trustsCache ? cached === undefined : this.#state.data === undefined;
 
-		if (missing || this.stale || fetchPolicy === "network-only" || fetchPolicy === "cache-and-network") {
-			void this.fetch(
-				this.stale || fetchPolicy === "network-only" ? this.refreshPolicy() : (fetchPolicy ?? "cache-first"),
+		if (missing || this.#stale || fetchPolicy === "network-only" || fetchPolicy === "cache-and-network") {
+			void this.#fetch(
+				this.#stale || fetchPolicy === "network-only" ? this.#refreshPolicy() : (fetchPolicy ?? "cache-first"),
 			);
 		}
 
 		if (pollInterval) {
 			const timer = setInterval(function poll(): void {
-				if (!ref.state.loading) void ref.refetch();
+				if (!ref.#state.loading && ref.#listeners.size > 0) void ref.refetch();
 			}, pollInterval);
 
-			this.teardowns.push(function stopPolling(): void {
+			this.#teardowns.push(function stopPolling(): void {
 				clearInterval(timer);
 			});
 		}
 
-		if (refetchOnFocus) this.listen(globalThis.document, "visibilitychange", isVisible);
-		if (refetchOnReconnect) this.listen(globalThis, "online", always);
+		if (refetchOnFocus) this.#listen(globalThis.document, "visibilitychange", isVisible);
+		if (refetchOnReconnect) this.#listen(globalThis, "online", always);
 	}
 
 	/**
 	 * Removes every background trigger and cache registration.
 	 */
-	private deactivate(): void {
-		for (const teardown of this.teardowns.splice(0)) teardown();
+	#deactivate(): void {
+		this.#active = false;
+
+		for (const teardown of this.#teardowns.splice(0)) teardown();
 
 		// Invalidations were delivered directly while active; later ones are detected on reactivation.
-		this.freshAsOf = this.host.epoch();
+		this.#freshAsOf = this.#host.epoch();
 	}
 
 	/**
@@ -280,7 +320,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @param type - Event type
 	 * @param condition - Extra condition evaluated per event
 	 */
-	private listen(target: EventTarget | undefined, type: string, condition: () => boolean): void {
+	#listen(target: EventTarget | undefined, type: string, condition: () => boolean): void {
 		if (!target?.addEventListener) return;
 
 		const ref = this;
@@ -289,11 +329,11 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		 * Refetches when the condition holds.
 		 */
 		function handle(): void {
-			if (condition()) void ref.refetch();
+			if (condition() && ref.#listeners.size > 0) void ref.refetch();
 		}
 
 		target.addEventListener(type, handle);
-		this.teardowns.push(function removeListener(): void {
+		this.#teardowns.push(function removeListener(): void {
 			target.removeEventListener(type, handle);
 		});
 	}
@@ -304,8 +344,8 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 *
 	 * @returns The fetch policy
 	 */
-	private refreshPolicy(): FetchPolicy {
-		const { fetchPolicy } = this.options;
+	#refreshPolicy(): FetchPolicy {
+		const { fetchPolicy } = this.#options;
 
 		return fetchPolicy === "cache-only" || fetchPolicy === "no-cache" ? fetchPolicy : "network-only";
 	}
@@ -316,25 +356,25 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @param fetchPolicy - The fetch policy
 	 * @returns The resulting state
 	 */
-	private async fetch(fetchPolicy: FetchPolicy): Promise<QueryState<TData>> {
-		const version = ++this.version;
+	async #fetch(fetchPolicy: FetchPolicy): Promise<QueryState<TData>> {
+		const version = ++this.#version;
 
-		this.stale = false;
-		this.freshAsOf = this.host.epoch();
-		this.setState({ data: this.state.data, error: this.state.error, loading: true });
+		this.#stale = false;
+		this.#freshAsOf = this.#host.epoch();
+		this.#setState({ data: this.#state.data, error: this.#state.error, loading: true });
 
 		try {
-			const data = await this.host.fetch(fetchPolicy);
+			const data = await this.#host.fetch(fetchPolicy);
 
-			if (version === this.version) {
-				this.fetched = true;
-				this.setState({ data, error: undefined, loading: false });
+			if (version === this.#version) {
+				this.#fetched = true;
+				this.#setState({ data, error: undefined, loading: false });
 			}
 		} catch (error) {
-			if (version === this.version) this.setState({ data: this.state.data, error, loading: false });
+			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
 		}
 
-		return this.state;
+		return this.#state;
 	}
 
 	/**
@@ -342,14 +382,14 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 *
 	 * @param next - The next state
 	 */
-	private setState(next: QueryState<TData>): void {
-		const { state } = this;
+	#setState(next: QueryState<TData>): void {
+		const state = this.#state;
 
 		if (state.data === next.data && state.error === next.error && state.loading === next.loading) return;
 
-		this.state = next;
+		this.#state = next;
 
-		for (const listener of [...this.listeners]) listener(next);
+		for (const listener of [...this.#listeners]) listener(next);
 	}
 }
 

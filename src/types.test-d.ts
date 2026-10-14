@@ -99,3 +99,29 @@ describe("required variables", function () {
 		expectTypeOf(Component).toBeFunction();
 	});
 });
+
+describe("required variables (review 3)", function () {
+	const union = "query { a }" as unknown as TypedDocumentString<User, { id: number } | { slug: string }>;
+	const needsId = "query { a }" as unknown as TypedDocumentString<User, { id: number }>;
+
+	it("checks union variables and rejects undefined", function () {
+		// @ts-expect-error a union member requires variables
+		client.gql({ query: union });
+		client.gql({ query: union, variables: { slug: "x" } });
+		// @ts-expect-error undefined cannot satisfy required variables
+		client.gql({ query: needsId, variables: undefined });
+	});
+
+	it("allows possibly-undefined variables on skippable hooks", function () {
+		/**
+		 * Type-only checks; never rendered.
+		 *
+		 * @param id - An optional id
+		 */
+		function Component(id: number | undefined): void {
+			useQuery({ query: needsId, variables: id === undefined ? undefined : { id }, skip: id === undefined });
+		}
+
+		expectTypeOf(Component).toBeFunction();
+	});
+});
