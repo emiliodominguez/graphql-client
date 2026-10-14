@@ -1,4 +1,4 @@
-import { cancelOnAbort, normalizeLineEndings } from "./sse";
+import { readDelimited } from "./sse";
 import type { GraphQLFormattedError } from "./types";
 
 /**
@@ -92,18 +92,43 @@ export function applyIncremental(state: IncrementalState, payload: IncrementalPa
 			state.data = updateIn(state.data, base, mergeWith(item.data));
 		}
 
-		state.errors.push(...(item.errors ?? []));
+		state.errors.push(...normalizeErrors(item.errors));
 	}
 
 	for (const { id, errors } of payload.completed ?? []) {
 		state.pending.delete(id);
-		state.errors.push(...(errors ?? []));
+		state.errors.push(...normalizeErrors(errors));
 	}
 
-	state.errors.push(...(payload.errors ?? []));
+	state.errors.push(...normalizeErrors(payload.errors));
 	state.hasNext = payload.hasNext ?? false;
 
 	return state;
+}
+
+/**
+ * Normalizes the `errors` of a response, which a buggy or hostile server may send as a single object, a string or
+ * a list with non-object entries.
+ *
+ * @param errors - The raw `errors` value
+ * @returns Well-formed errors (empty when there are none)
+ */
+export function normalizeErrors(errors: unknown): GraphQLFormattedError[] {
+	if (errors === undefined || errors === null) return [];
+
+	return (Array.isArray(errors) ? errors : [errors]).map(toFormattedError);
+}
+
+/**
+ * Normalizes one GraphQL error.
+ *
+ * @param error - The raw error
+ * @returns The error, or a placeholder carrying its text
+ */
+function toFormattedError(error: unknown): GraphQLFormattedError {
+	if (isContainer(error) && typeof error.message === "string") return error as unknown as GraphQLFormattedError;
+
+	return { message: typeof error === "string" ? error : "Unknown error" };
 }
 
 /**
@@ -165,7 +190,7 @@ export function deepMerge(target: unknown, patch: unknown): unknown {
 	const result: Record<string, unknown> = Array.isArray(target) ? ([...target] as never) : { ...target };
 
 	for (const [key, value] of Object.entries(patch)) {
-		result[key] = deepMerge(result[key], value);
+		setOwn(result, key, deepMerge(getOwn(result, key), value));
 	}
 
 	return result;
@@ -185,9 +210,34 @@ function updateIn(root: unknown, path: Path, updater: (value: unknown) => unknow
 	const [head, ...rest] = path as [string | number, ...Path];
 	const copy: Record<string | number, unknown> = Array.isArray(root) ? ([...root] as never) : { ...(root as object) };
 
-	copy[head] = updateIn(copy[head], rest, updater);
+	setOwn(copy, String(head), updateIn(getOwn(copy, String(head)), rest, updater));
 
 	return copy;
+}
+
+/**
+ * Reads an own property, never an inherited one (`__proto__` from a hostile server reads as missing).
+ *
+ * @param container - An object or array
+ * @param key - The property
+ * @returns The own value, if any
+ */
+function getOwn(container: Record<string, unknown>, key: string): unknown {
+	return Object.hasOwn(container, key) ? container[key] : undefined;
+}
+
+/**
+ * Writes an own data property: a `__proto__` key from a hostile server stays data instead of replacing the
+ * prototype. Arrays only accept indices.
+ *
+ * @param container - An object or array
+ * @param key - The property
+ * @param value - The value
+ */
+function setOwn(container: Record<string, unknown>, key: string, value: unknown): void {
+	if (Array.isArray(container) && !/^\d+$/.test(key)) return;
+
+	Object.defineProperty(container, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 /**
@@ -207,7 +257,9 @@ function isContainer(value: unknown): value is Record<string, unknown> {
  * @returns The boundary (defaults to `-`)
  */
 export function getBoundary(contentType: string): string {
-	return /boundary="?([^";,]+)"?/i.exec(contentType)?.[1] ?? "-";
+	const match = /boundary=(?:"([^"]+)"|([^\s;,]+))/i.exec(contentType);
+
+	return match?.[1] ?? match?.[2] ?? "-";
 }
 
 /**
@@ -224,39 +276,11 @@ export async function* readMultipartMixed(
 	boundary: string,
 	signal?: AbortSignal,
 ): AsyncGenerator<string> {
-	const reader = stream.getReader();
-	const release = cancelOnAbort(reader, signal);
-	const decoder = new TextDecoder();
-	const delimiter = `\n--${boundary}`;
-	let buffer = "\n";
-	let finished = false;
+	for await (const [part, rest] of readDelimited(stream, `\n--${boundary}`, signal, "\n")) {
+		const body = getPartBody(part);
 
-	try {
-		while (!finished) {
-			const { done, value } = await reader.read();
-
-			finished = done;
-			buffer = normalizeLineEndings(buffer + decoder.decode(value, { stream: !done }), done);
-
-			let index = buffer.indexOf(delimiter);
-
-			while (index !== -1) {
-				const body = getPartBody(buffer.slice(0, index));
-				const rest = buffer.slice(index + delimiter.length);
-
-				if (body) yield body;
-				if (rest.startsWith("--")) return;
-
-				buffer = rest;
-				index = buffer.indexOf(delimiter);
-			}
-		}
-	} finally {
-		release();
-
-		if (!finished) await reader.cancel().catch(ignore);
-
-		reader.releaseLock();
+		if (body) yield body;
+		if (rest.startsWith("--")) return;
 	}
 }
 
@@ -272,8 +296,3 @@ function getPartBody(part: string): string {
 
 	return body.trim().startsWith("{") ? body.trim() : "";
 }
-
-/**
- * Swallows a rejection.
- */
-function ignore(): void {}

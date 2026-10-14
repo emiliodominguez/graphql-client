@@ -23,9 +23,10 @@ export interface AbortScope {
 }
 
 /**
- * Strings and comments are blanked out before scanning so keywords inside them are never matched.
+ * Strings and comments are blanked out before scanning so keywords inside them are never matched. An unterminated
+ * string runs to the end of its line, so it is never rescanned from each following quote (quadratic time).
  */
-const IGNORED_TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*/g;
+const IGNORED_TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"?|#[^\n\r]*/g;
 
 /**
  * Matches a block whose nested blocks are already collapsed to `{}`.
@@ -221,6 +222,11 @@ export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Pr
 }
 
 /**
+ * Longest delay `setTimeout` supports (2^31-1 ms, about 24.8 days).
+ */
+const MAX_DELAY = 2_147_483_647;
+
+/**
  * Merges an external abort signal with an optional timeout into a single, internally controllable signal.
  * Avoids `AbortSignal.any` / `AbortSignal.timeout` to keep older runtimes supported.
  *
@@ -231,8 +237,9 @@ export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Pr
 export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortScope {
 	const controller = new AbortController();
 	// Only finite, positive timeouts arm a timer: `0`, `Infinity` and `NaN` mean "no timeout".
+	// Timers overflow above 2^31-1 ms (they would fire at once): such timeouts (~25 days) are treated as none too.
 	const timer =
-		timeout !== undefined && timeout > 0 && timeout < Infinity ? setTimeout(abortOnTimeout, timeout) : undefined;
+		timeout !== undefined && timeout > 0 && timeout <= MAX_DELAY ? setTimeout(abortOnTimeout, timeout) : undefined;
 
 	/**
 	 * Aborts with the same `TimeoutError` reason `AbortSignal.timeout` would produce.
@@ -277,7 +284,8 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
 	return new Promise(function wait(resolve, reject): void {
 		if (signal.aborted) return reject(signal.reason);
 
-		const timer = setTimeout(done, ms);
+		// Timers overflow above 2^31-1 ms and would fire at once.
+		const timer = setTimeout(done, Math.min(ms, MAX_DELAY));
 
 		/**
 		 * Resolves once the delay elapsed.

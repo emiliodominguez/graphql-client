@@ -3,6 +3,7 @@ import {
 	applyIncremental,
 	createIncrementalState,
 	getBoundary,
+	normalizeErrors,
 	INCREMENTAL_DIRECTIVE,
 	MULTIPART_ACCEPT,
 	readMultipartMixed,
@@ -838,7 +839,10 @@ export class Client {
 
 		headers.delete("Content-Type");
 
-		return new Request(`${url}${url.includes("?") ? "&" : "?"}${params}`, { method, headers, signal });
+		// Params go before any `#fragment` (never sent to the server).
+		const [base = url] = url.split("#", 1);
+
+		return new Request(`${base}${base.includes("?") ? "&" : "?"}${params}`, { method, headers, signal });
 	}
 
 	/**
@@ -963,10 +967,10 @@ export class Client {
 			throw new ClientError(message, { status, response, cause });
 		}
 
-		const errors = body?.errors;
+		const errors = normalizeErrors(body?.errors);
 		const data = body?.data ?? undefined;
 
-		if (errors?.length) throw createGraphQLError(response, errors, data);
+		if (errors.length) throw createGraphQLError(response, errors, data);
 
 		if (!response.ok) {
 			throw new ClientError(describeStatus(response), { status, response, data });

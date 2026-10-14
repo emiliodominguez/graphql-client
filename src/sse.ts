@@ -20,29 +20,69 @@ export async function* readServerSentEvents(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 ): AsyncGenerator<ServerSentEvent> {
+	for await (const [block] of readDelimited(stream, "\n\n", signal)) {
+		const event = parseEvent(block);
+
+		if (event) yield event;
+	}
+}
+
+/**
+ * Splits a text stream on a delimiter, normalizing line endings to LF. Linear in the body size: each chunk is
+ * normalized and searched once (plus a small overlap), and chunks are only joined once a delimiter is found.
+ * Text after the last delimiter is dropped when the stream ends. Cancels the stream when the consumer stops early.
+ *
+ * @param stream - The response body
+ * @param delimiter - The delimiter (at least two characters, in normalized form)
+ * @param signal - Cancels the stream when aborted, even if the body is not tied to a fetch
+ * @param initial - Text considered to precede the body
+ * @yields Each delimited segment, with the (possibly partial) text received after its delimiter
+ */
+export async function* readDelimited(
+	stream: ReadableStream<Uint8Array>,
+	delimiter: string,
+	signal?: AbortSignal,
+	initial = "",
+): AsyncGenerator<[segment: string, rest: string]> {
 	const reader = stream.getReader();
 	const release = cancelOnAbort(reader, signal);
 	const decoder = new TextDecoder();
-	let buffer = "";
+	const overlap = delimiter.length - 1;
+	let chunks = [initial];
+	let tail = initial.slice(-overlap);
+	let carry = false;
 	let finished = false;
 
 	try {
 		while (!finished) {
 			const { done, value } = await reader.read();
+			// A trailing CR may be the first half of a CRLF pair: it is held back until the next chunk.
+			let text: string = (carry ? "\r" : "") + decoder.decode(value, { stream: !done });
 
 			finished = done;
-			buffer = normalizeLineEndings(buffer + decoder.decode(value, { stream: !done }), done);
+			carry = !done && text.endsWith("\r");
+			text = (carry ? text.slice(0, -1) : text).replace(/\r\n?/g, "\n");
 
-			let boundary = buffer.indexOf("\n\n");
-
-			while (boundary !== -1) {
-				const event = parseEvent(buffer.slice(0, boundary));
-
-				buffer = buffer.slice(boundary + 2);
-				boundary = buffer.indexOf("\n\n");
-
-				if (event) yield event;
+			if ((tail + text).indexOf(delimiter) === -1) {
+				chunks.push(text);
+				tail = (tail + text).slice(-overlap);
+				continue;
 			}
+
+			let buffer = chunks.join("") + text;
+			let index = buffer.indexOf(delimiter);
+
+			while (index !== -1) {
+				const rest = buffer.slice(index + delimiter.length);
+
+				yield [buffer.slice(0, index), rest];
+
+				buffer = rest;
+				index = buffer.indexOf(delimiter);
+			}
+
+			chunks = [buffer];
+			tail = buffer.slice(-overlap);
 		}
 	} finally {
 		release();
@@ -51,21 +91,6 @@ export async function* readServerSentEvents(
 
 		reader.releaseLock();
 	}
-}
-
-/**
- * Converts CRLF and CR line endings to LF. A trailing CR is held back until the next chunk,
- * since it may be the first half of a CRLF pair.
- *
- * @param text - Buffered text
- * @param done - Whether the stream ended
- * @returns The normalized text
- */
-export function normalizeLineEndings(text: string, done: boolean): string {
-	const hold = !done && text.endsWith("\r");
-	const normalized = (hold ? text.slice(0, -1) : text).replace(/\r\n?/g, "\n");
-
-	return hold ? `${normalized}\r` : normalized;
 }
 
 /**

@@ -10,9 +10,15 @@ export type DocumentString<TData = unknown, TVariables = Record<string, unknown>
 	TypedDocumentString<TData, TVariables>;
 
 /**
- * Tokens the lexer must keep verbatim (strings) or drop (comments).
+ * Tokens the lexer must keep verbatim (strings) or drop (comments). An unterminated string runs to the end of its
+ * line, so it is never rescanned from each following quote (quadratic time).
  */
-const TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*|[\s,]+|[^"#\s,]+/g;
+const TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"?|#[^\n\r]*|[\s,]+|[^"#\s,]+/g;
+
+/**
+ * Comments (and the whitespace after them) at the start of a definition.
+ */
+const LEADING_COMMENTS = /^(?:#[^\n\r]*\s*)+/;
 
 /**
  * Characters that need a separating space when adjacent (names, numbers, variables, negative numbers).
@@ -82,7 +88,8 @@ export function dedupeFragments(document: string): string {
 	}
 
 	const unique = definitions.filter(function isFirstDefinition(definition: string): boolean {
-		const name = /^(?:#[^\n\r]*\s*)*fragment\s+([_A-Za-z]\w*)/.exec(definition)?.[1];
+		// Comments are stripped first: a single regex with a repeated comment group backtracks exponentially.
+		const name = /^fragment\s+([_A-Za-z]\w*)/.exec(definition.replace(LEADING_COMMENTS, ""))?.[1];
 
 		if (!name) return true;
 		if (seen.has(name)) return false;

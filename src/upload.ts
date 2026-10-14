@@ -45,7 +45,16 @@ export function extractFiles(value: unknown, files: Map<Blob, string[]>, path = 
 	// Null prototype: a `__proto__` key stays a regular property.
 	const clone: Record<string, unknown> = Object.create(null);
 
-	for (const key of Object.keys(value)) clone[key] = extractFiles(value[key], files, `${path}.${key}`);
+	for (const key of Object.keys(value)) {
+		// Spec paths are dot-separated without escaping: the server would look for the file elsewhere.
+		if (key.includes(".") && containsFiles(value[key])) {
+			throw new TypeError(
+				`Cannot upload files under "${path}.${key}": object keys on a file path cannot contain dots.`,
+			);
+		}
+
+		clone[key] = extractFiles(value[key], files, `${path}.${key}`);
+	}
 
 	return clone;
 }
