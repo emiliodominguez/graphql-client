@@ -5,7 +5,7 @@
 [![Runtime dependencies: 0](https://img.shields.io/badge/deps-0-2ea44f?style=for-the-badge&labelColor=161b22&logo=npm&logoColor=white)](./package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3da639?style=for-the-badge&labelColor=161b22&logo=opensourceinitiative&logoColor=white)](./LICENSE)
 
-**A typed GraphQL client with zero runtime dependencies.**
+**lumenql** is a typed GraphQL client with zero runtime dependencies.
 
 Caching, live queries, retries, subscriptions and streaming, with optional React hooks. Built on the Fetch API for browsers, Node.js, Deno, Bun and edge runtimes, with ESM and CommonJS builds.
 
@@ -44,15 +44,15 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 ## Install
 
 ```bash
-yarn add @emiliodominguez/graphql-client
+yarn add lumenql
 # or
-npm i @emiliodominguez/graphql-client
+npm i lumenql
 ```
 
 ## Quick start
 
 ```ts
-import { Client, MemoryCache, graphql } from "@emiliodominguez/graphql-client";
+import { Client, MemoryCache, graphql } from "lumenql";
 
 const client = new Client({
 	url: "https://rickandmortyapi.com/graphql",
@@ -157,7 +157,7 @@ Any watched query (live query or React hook) under an invalidated prefix refetch
 Pass `optimistic` updates to update the UI immediately. If the operation fails, every update is rolled back automatically:
 
 ```ts
-import { optimistic } from "@emiliodominguez/graphql-client";
+import { optimistic } from "lumenql";
 
 await client.gql({
 	query: ADD_TODO,
@@ -181,7 +181,7 @@ await client.gql({
 `StorageCache` persists results in `localStorage`, `sessionStorage` or any Storage-like object. That gives instant cache-first renders after a reload and offline reads:
 
 ```ts
-import { StorageCache } from "@emiliodominguez/graphql-client";
+import { StorageCache } from "lumenql";
 
 const client = new Client({ url, cache: new StorageCache({ prefix: "app:", ttl: 24 * 60 * 60_000 }) });
 ```
@@ -193,7 +193,7 @@ It is namespaced (use distinct, non-nested prefixes: `app:` and `admin:`, not `g
 Implement `Cache`. Every method can be sync or async, so you can back it with IndexedDB, Redis or a KV store:
 
 ```ts
-import type { Cache } from "@emiliodominguez/graphql-client";
+import type { Cache } from "lumenql";
 
 const redisCache: Cache = {
 	async get(key) {
@@ -290,7 +290,7 @@ const todos = from(client.watch({ key: ["todos"], query: TODOS }));
 ## React
 
 ```tsx
-import { GraphQLProvider, useMutation, useQuery } from "@emiliodominguez/graphql-client/react";
+import { GraphQLProvider, useMutation, useQuery } from "lumenql/react";
 
 function App() {
 	return (
@@ -366,7 +366,7 @@ await client.gql({ query, retry: false }); // per-call override
 By default, network failures and HTTP 408, 429 and 5xx are retried for **queries only**, since mutations aren't idempotent. Retries back off exponentially with jitter (about 1 s, 2 s, 4 s and so on, capped at 30 s) and honor `Retry-After`. The `isRetryable` predicate is exported so you can extend it:
 
 ```ts
-import { isClientError, isRetryable } from "@emiliodominguez/graphql-client";
+import { isClientError, isRetryable } from "lumenql";
 
 const client = new Client({
 	url,
@@ -384,7 +384,7 @@ const client = new Client({
 Middleware wraps every request, retries included, using standard `Request` and `Response` objects:
 
 ```ts
-import type { Middleware } from "@emiliodominguez/graphql-client";
+import type { Middleware } from "lumenql";
 
 const tracing: Middleware = async function tracing(request, next, context) {
 	const headers = new Headers(request.headers);
@@ -454,8 +454,8 @@ This implements [GraphQL over SSE](https://github.com/enisdenjo/graphql-sse/blob
 `/ws` is a zero-dependency implementation of the [`graphql-transport-ws`](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md) protocol, as used by the `graphql-ws` library and supported by Apollo Server, GraphQL Yoga, Hasura, Mercurius and Hot Chocolate. Plug it in as the `subscriptionTransport`, and `client.subscribe()` and `useSubscription()` use it for `subscription` operations:
 
 ```ts
-import { Client } from "@emiliodominguez/graphql-client";
-import { createWebSocketTransport } from "@emiliodominguez/graphql-client/ws";
+import { Client } from "lumenql";
+import { createWebSocketTransport } from "lumenql/ws";
 
 const client = new Client({
 	url: "https://api.example.com/graphql",
@@ -489,7 +489,7 @@ Set `timeout: 0` to disable the client's default timeout for a single call. Non-
 ## Error handling
 
 ```ts
-import { isClientError } from "@emiliodominguez/graphql-client";
+import { isClientError } from "lumenql";
 
 try {
 	await client.gql({ query });
@@ -578,11 +578,11 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
-| Import                                  | Size    |
-| --------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken)  | ~7.6 kB |
-| `@emiliodominguez/graphql-client/react` | ~1.5 kB |
-| `@emiliodominguez/graphql-client/ws`    | ~1.5 kB |
+| Import                                 | Size    |
+| -------------------------------------- | ------- |
+| `Client` + `MemoryCache` (tree-shaken) | ~7.6 kB |
+| `lumenql/react`                        | ~1.5 kB |
+| `lumenql/ws`                           | ~1.5 kB |
 
 ## Development
 

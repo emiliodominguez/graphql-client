@@ -15,10 +15,10 @@
 - Pagination with `fetchMore` on `QueryRef`, `useQuery` and `useSuspenseQuery`. It merges pages and writes the result to the cache entry.
 - `QueryRef` follows the Svelte store contract, and the README has recipes for Svelte, Vue and Solid.
 - `yarn verify` runs the full CI sequence locally. It is also used by `prepublishOnly`.
-- WebSocket transport (`@emiliodominguez/graphql-client/ws`), a zero-dependency implementation of `graphql-transport-ws`. It shares one socket across subscriptions, connects and closes lazily, takes async `connectionParams`, and supports ack timeout, ping/pong keep-alive, and reconnect with resubscribe.
+- WebSocket transport (`lumenql/ws`), a zero-dependency implementation of `graphql-transport-ws`. It shares one socket across subscriptions, connects and closes lazily, takes async `connectionParams`, and supports ack timeout, ping/pong keep-alive, and reconnect with resubscribe.
 - A pluggable `subscriptionTransport` option and the `SubscriptionTransport` interface.
 - A release workflow that publishes to npm with provenance on each GitHub release.
-- React bindings (`@emiliodominguez/graphql-client/react`): `GraphQLProvider`, `useQuery`, `useSuspenseQuery`, `useMutation`, `useSubscription` and `useClient`.
+- React bindings (`lumenql/react`): `GraphQLProvider`, `useQuery`, `useSuspenseQuery`, `useMutation`, `useSubscription` and `useClient`.
 - Live queries (`client.watch()`). They activate lazily, keep stale data visible while revalidating, and refetch on invalidation, polling, focus and reconnect.
 - Fetch policies (`cache-first`, `network-only`, `cache-only`, `no-cache`).
 - `client.read()` and `client.write()` for optimistic updates. `write()` notifies watchers.
@@ -88,6 +88,7 @@
 
 ### Changed
 
+- The package is published as `lumenql` (subpaths `lumenql/react` and `lumenql/ws`). Debug logs use the `[lumenql]` prefix.
 - Faster hot paths, about 1.5-1.8x on cache hits (`yarn bench`): documents are parsed once and memoized, file detection no longer deep-clones the variables, and cache keys embed a 64-bit hash of the document instead of its full text. Persisted cache entries written with the previous key format are simply misses.
 - The build targets ES2022. Internals use native `#private` fields: truly private at runtime, and minified for a smaller bundle. This requires Node 20+ and browsers from 2021 or later.
 - `SubscriptionRequest.query` is optional and `extensions` was added. Strict persisted queries send only `extensions.persistedQuery`.

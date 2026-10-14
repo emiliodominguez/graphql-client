@@ -1311,7 +1311,7 @@ export class Client {
 	#log(operation: OperationInfo, detail: string): void {
 		if (!this.#configuration.debug) return;
 
-		console.debug(`[graphql-client] ${operation.type} ${operation.name ?? "(anonymous)"} → ${detail}`);
+		console.debug(`[lumenql] ${operation.type} ${operation.name ?? "(anonymous)"} → ${detail}`);
 	}
 }
 

@@ -550,10 +550,10 @@ describe("Client", function () {
 				return String(call[0]);
 			});
 
-			expect(lines[0]).toBe("[graphql-client] query GetUser → deduplicated");
-			expect(lines[1]).toMatch(/^\[graphql-client\] query GetUser → ok in \d+ms$/);
-			expect(lines[2]).toBe("[graphql-client] query GetUser → cache hit");
-			expect(lines[3]).toMatch(/^\[graphql-client\] query \(anonymous\) → ok/);
+			expect(lines[0]).toBe("[lumenql] query GetUser → deduplicated");
+			expect(lines[1]).toMatch(/^\[lumenql\] query GetUser → ok in \d+ms$/);
+			expect(lines[2]).toBe("[lumenql] query GetUser → cache hit");
+			expect(lines[3]).toMatch(/^\[lumenql\] query \(anonymous\) → ok/);
 		});
 
 		it("stays silent by default", async function () {

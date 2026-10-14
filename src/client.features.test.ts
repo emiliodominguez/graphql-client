@@ -209,7 +209,7 @@ describe("retries", function () {
 			query: GET_USER,
 		});
 
-		expect(consoleDebug).toHaveBeenCalledWith("[graphql-client] query GetUser → retry 1/1 in 0ms");
+		expect(consoleDebug).toHaveBeenCalledWith("[lumenql] query GetUser → retry 1/1 in 0ms");
 		expect(consoleDebug).toHaveBeenLastCalledWith(expect.stringMatching(/ok in \d+ms after 1 retries$/));
 	});
 });
@@ -535,7 +535,7 @@ describe("subscribe", function () {
 			// drain
 		}
 
-		expect(consoleDebug).toHaveBeenCalledWith("[graphql-client] subscription OnMessage → streaming");
+		expect(consoleDebug).toHaveBeenCalledWith("[lumenql] subscription OnMessage → streaming");
 	});
 });
 
