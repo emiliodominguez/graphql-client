@@ -41,6 +41,15 @@ describe("parseOperation", function () {
 		expect(parseOperation(document)).toEqual({ type: "query", name: "Search" });
 	});
 
+	it("never reads fields named like keywords as operations", function () {
+		expect(parseOperation("{ customer { address { city } subscription { status } } }")).toEqual({ type: "query" });
+		expect(parseOperation("{ a { b } mutation }")).toEqual({ type: "query" });
+		expect(parseOperation("query A($v: In = { x: { y: 1 } }) { a { b } mutation } mutation B { c }", "B")).toEqual({
+			type: "mutation",
+			name: "B",
+		});
+	});
+
 	it("selects the operation matching operationName", function () {
 		const document = "query A { a } mutation B { b }";
 

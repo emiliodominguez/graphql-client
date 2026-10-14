@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Anonymous shorthand queries with a field named `subscription` or `mutation` after a nested selection were detected as that operation type (and routed as a subscription or never cached).
 - A rolled-back optimistic change no longer stays visible when the refetch meant to replace it fails, including for live queries that were inactive while the layer settled. Live queries get the real data (or none) pushed directly.
 - Found by a seeded model-based fuzzer (now part of the test suite):
   - An invalidation issued through another client sharing the cache (`extend()`) no longer lets live queries join a stale in-flight request.

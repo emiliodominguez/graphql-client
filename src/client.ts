@@ -228,10 +228,12 @@ export class Client {
 			}
 		}
 
+		const context: OperationContext = { ...operation, query, variables: options.variables, attempt: 0 };
+
 		if (fetchPolicy === "cache-only") {
 			const error = new Error(`No cached data for ${operation.type} ${operation.name ?? "(anonymous)"} (cache-only).`);
 
-			this.#report(error, { ...operation, query, variables: options.variables, attempt: 0 }, options.signal);
+			this.#report(error, context, options.signal);
 			throw error;
 		}
 
@@ -241,7 +243,7 @@ export class Client {
 			try {
 				settle = await this.#applyOptimistic(options.optimistic);
 			} catch (error) {
-				this.#report(error, { ...operation, query, variables: options.variables, attempt: 0 }, options.signal);
+				this.#report(error, context, options.signal);
 				throw error;
 			}
 		}
@@ -263,7 +265,7 @@ export class Client {
 			try {
 				await settle?.(true);
 			} catch (settleError) {
-				this.#report(settleError, { ...operation, query, variables: options.variables, attempt: 0 }, options.signal);
+				this.#report(settleError, context, options.signal);
 			}
 
 			return data;

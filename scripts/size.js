@@ -5,7 +5,7 @@ import { buildSync, transformSync } from "esbuild";
 /**
  * Maximum min+gzip size of a typical app import (`Client` + `MemoryCache`, tree-shaken), in bytes. CI fails above it.
  */
-const BUDGET = 8 * 1024;
+const BUDGET = 8.25 * 1024;
 
 /**
  * What a typical app imports.

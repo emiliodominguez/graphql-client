@@ -28,6 +28,11 @@ export interface AbortScope {
 const IGNORED_TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*/g;
 
 /**
+ * Matches a block whose nested blocks are already collapsed to `{}`.
+ */
+const INNERMOST_BLOCK = /\{(?:[^{}]|\{\})*\}/g;
+
+/**
  * Matches an operation definition at the start of the document or right after a previous definition.
  */
 const OPERATION_DEFINITION = /(?:^|\})\s*(query|mutation|subscription)\b\s*([_A-Za-z][_0-9A-Za-z]*)?/g;
@@ -61,7 +66,16 @@ function inspectDocument(document: string): DocumentInfo {
 		let h1 = 0xdeadbeef;
 		let h2 = 0x41c6ce57;
 
-		for (const match of document.replace(IGNORED_TOKENS, " ").trim().matchAll(OPERATION_DEFINITION)) {
+		let source = document.replace(IGNORED_TOKENS, " ");
+
+		// Collapse blocks innermost first, so fields named like keywords (`subscription { ... }`) never read as
+		// operation definitions.
+		for (let previous = ""; previous !== source;) {
+			previous = source;
+			source = source.replace(INNERMOST_BLOCK, "{}");
+		}
+
+		for (const match of source.trim().matchAll(OPERATION_DEFINITION)) {
 			operations.push({ type: match[1] as OperationType, name: match[2] });
 		}
 
@@ -95,7 +109,11 @@ function inspectDocument(document: string): DocumentInfo {
 export function parseOperation(document: string, operationName?: string): OperationInfo {
 	const { operations } = inspectDocument(document);
 
-	return (operationName && operations.find(hasName, operationName)) || operations[0]!;
+	if (operationName) {
+		for (const operation of operations) if (operation.name === operationName) return operation;
+	}
+
+	return operations[0]!;
 }
 
 /**
@@ -107,17 +125,6 @@ export function parseOperation(document: string, operationName?: string): Operat
  */
 export function hashDocument(document: string): string {
 	return inspectDocument(document).hash;
-}
-
-/**
- * `Array.prototype.find` callback matching the operation named `this`.
- *
- * @param this - The operation name
- * @param info - A parsed operation
- * @returns `true` when the names match
- */
-function hasName(this: string, info: OperationInfo): boolean {
-	return info.name === this;
 }
 
 /**
