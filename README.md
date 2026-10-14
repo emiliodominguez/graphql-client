@@ -18,7 +18,7 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 - **Automatic Persisted Queries and GET.** Send small hashed requests that a CDN can cache. `minify()` shortens documents further.
 - **File uploads.** Follows the GraphQL multipart request spec, and switches on automatically when variables contain a `File` or `Blob`.
 - **`@defer` / `@stream`.** Incremental delivery over `multipart/mixed` or SSE, in both the current and the 2022 payload formats.
-- **Subscriptions over SSE or WebSocket.** GraphQL over SSE built in, or a zero-dependency `graphql-transport-ws` transport (`/ws`, ~1.6 kB) with reconnects and keep-alive. Any other transport plugs in the same way.
+- **Subscriptions over SSE or WebSocket.** GraphQL over SSE built in, or a zero-dependency `graphql-transport-ws` transport (`/ws`, ~1.8 kB) with reconnects and keep-alive. Any other transport plugs in the same way.
 
 **Data**
 
@@ -547,22 +547,22 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 ### `new Client(configuration)`
 
-| Option                  | Type                                             | Default            | Description                                                                                 |
-| ----------------------- | ------------------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------- |
-| `url`                   | `string`                                         | (required)         | GraphQL endpoint.                                                                           |
-| `authToken`             | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.                                                    |
-| `headers`               | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                                                            |
-| `cache`                 | `Cache`                                          | none (no caching)  | Result cache.                                                                               |
-| `fetch`                 | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch for SSR, tests or instrumentation.                                             |
-| `timeout`               | `number` (ms)                                    | none               | Default request timeout.                                                                    |
-| `dedupe`                | `boolean`                                        | `true`             | Share in-flight identical queries.                                                          |
-| `retry`                 | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).                                                      |
-| `middleware`            | `Middleware[]`                                   | `[]`               | Request/response middleware.                                                                |
-| `method`                | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                                                                    |
-| `persistedQueries`      | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                                                                |
-| `subscriptionTransport` | `SubscriptionTransport`                          | SSE over `fetch`   | Transport for `subscription` operations.                                                    |
-| `onError`               | `(error, context) => void`                       | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401. |
-| `debug`                 | `boolean`                                        | `false`            | Log operations, timings and cache hits.                                                     |
+| Option                  | Type                                             | Default            | Description                                                                                                                       |
+| ----------------------- | ------------------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `url`                   | `string`                                         | (required)         | GraphQL endpoint.                                                                                                                 |
+| `authToken`             | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.                                                                                          |
+| `headers`               | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                                                                                                  |
+| `cache`                 | `Cache`                                          | none (no caching)  | Result cache.                                                                                                                     |
+| `fetch`                 | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch (SSR, tests, a proxy agent). Called as `fetch(url, init)`, so node-fetch, cross-fetch or an npm `undici` work as is. |
+| `timeout`               | `number` (ms)                                    | none               | Default request timeout.                                                                                                          |
+| `dedupe`                | `boolean`                                        | `true`             | Share in-flight identical queries.                                                                                                |
+| `retry`                 | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).                                                                                            |
+| `middleware`            | `Middleware[]`                                   | `[]`               | Request/response middleware.                                                                                                      |
+| `method`                | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                                                                                                          |
+| `persistedQueries`      | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                                                                                                      |
+| `subscriptionTransport` | `SubscriptionTransport`                          | SSE over `fetch`   | Transport for `subscription` operations.                                                                                          |
+| `onError`               | `(error, context) => void`                       | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401.                                       |
+| `debug`                 | `boolean`                                        | `false`            | Log operations, timings and cache hits.                                                                                           |
 
 ### Methods
 
@@ -604,9 +604,9 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                 | Size    |
 | -------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken) | ~8.8 kB |
-| `lumenql/react`                        | ~1.7 kB |
-| `lumenql/ws`                           | ~1.6 kB |
+| `Client` + `MemoryCache` (tree-shaken) | ~9.2 kB |
+| `lumenql/react`                        | ~1.8 kB |
+| `lumenql/ws`                           | ~1.8 kB |
 
 ## Development
 

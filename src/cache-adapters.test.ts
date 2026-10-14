@@ -17,6 +17,17 @@ const FEED = "query Feed($page: Int) { feed(page: $page) }";
 const ADD = "mutation Add { add }";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Lets pending promises and 0ms timers run.
  */
 async function tick(ms = 0): Promise<void> {
@@ -208,8 +219,8 @@ describe("async cache adapters", function () {
 		const client = new Client({
 			url: URL,
 			cache,
-			fetch: vi.fn<typeof fetch>(async function (input) {
-				const body = (await (input as Request).json()) as { variables?: { page?: number } };
+			fetch: vi.fn<typeof fetch>(async function (input, init) {
+				const body = (await toRequest(input, init).json()) as { variables?: { page?: number } };
 				const page = body.variables?.page ?? 0;
 
 				return Response.json({ data: { feed: [page] } });

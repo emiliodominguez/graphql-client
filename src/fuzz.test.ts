@@ -51,6 +51,17 @@ const URL = "https://fuzz.test/graphql";
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * The mulberry32 PRNG: small, fast and good enough to explore interleavings reproducibly.
  *
  * @param seed - The seed
@@ -442,12 +453,13 @@ class FakeServer {
 	/**
 	 * Parks an incoming request.
 	 *
-	 * @param input - The request
+	 * @param input - The URL or request
+	 * @param init - The request init
 	 * @returns The response, once delivered
 	 */
-	async #receive(input: RequestInfo | URL): Promise<Response> {
+	async #receive(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
 		const evt = this.#events();
-		const body = (await (input as Request).clone().json()) as { query: string; variables?: Record<string, unknown> };
+		const body = (await toRequest(input, init).clone().json()) as { query: string; variables?: Record<string, unknown> };
 		const pending = this.pending;
 		const seq = this.requests++;
 

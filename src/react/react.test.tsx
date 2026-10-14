@@ -13,6 +13,17 @@ const TODOS = "query Todos { todos }";
 const ADD = "mutation Add($title: String!) { add(title: $title) }";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Creates a client whose server keeps a todo list.
  *
  * @param configuration - Overrides
@@ -20,8 +31,8 @@ const ADD = "mutation Add($title: String!) { add(title: $title) }";
  */
 function setup(configuration: Partial<ClientConfiguration> = {}) {
 	const todos: string[] = ["a"];
-	const fetchMock = vi.fn<typeof fetch>(async function (input) {
-		const { query, variables } = await (input as Request).json();
+	const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+		const { query, variables } = await toRequest(input, init).json();
 
 		if (query.startsWith("mutation")) {
 			if (variables.title === "boom") return Response.json({ errors: [{ message: "rejected" }] });
@@ -639,8 +650,8 @@ describe("regressions", function () {
 describe("keepPreviousData", function () {
 	it("keeps showing the previous data while new variables load", async function () {
 		const releases: Array<() => void> = [];
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const { variables } = await (input as Request).json();
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const { variables } = await toRequest(input, init).json();
 
 			if (variables.page > 1) {
 				await new Promise<void>(function (resolve) {

@@ -63,6 +63,17 @@ function setup(configuration: Partial<ClientConfiguration> = {}, fetchMock = moc
 }
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Reads the Request of a fetch mock call.
  *
  * @param fetchMock - The fetch mock
@@ -70,7 +81,9 @@ function setup(configuration: Partial<ClientConfiguration> = {}, fetchMock = moc
  * @returns The Request passed to fetch
  */
 function getRequest(fetchMock: ReturnType<typeof mockFetch>, call = 0): Request {
-	return fetchMock.mock.calls[call]![0] as Request;
+	const [input, init] = fetchMock.mock.calls[call]!;
+
+	return toRequest(input, init);
 }
 
 /**
@@ -308,8 +321,8 @@ describe("Client", function () {
 		/**
 		 * fetch mock that never settles until its signal aborts, like the real thing.
 		 */
-		const hangingFetch = vi.fn<typeof fetch>(function (input) {
-			const { signal } = input as Request;
+		const hangingFetch = vi.fn<typeof fetch>(function (input, init) {
+			const { signal } = toRequest(input, init);
 
 			return new Promise<Response>(function (_resolve, reject) {
 				if (signal.aborted) return reject(signal.reason);

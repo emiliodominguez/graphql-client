@@ -81,6 +81,8 @@ export interface WebSocketLike {
 	onmessage: ((event: never) => unknown) | null;
 	/** Called once closed */
 	onclose: ((event: never) => unknown) | null;
+	/** Called on failure */
+	onerror?: ((event: never) => unknown) | null;
 }
 
 /**
@@ -259,6 +261,14 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 
 		current.onclose = function handleClose(event: CloseInfo): void {
 			closed(current, event);
+		};
+
+		// `ws` throws an 'error' event that has no listener (process crash); Node 22's undici WebSocket never fires
+		// `close` after a failed handshake. A failure before the socket opened is handled as an abnormal close.
+		current.onerror = function handleError(): void {
+			if (current.readyState === 1) return;
+
+			closed(current, { code: 1006, reason: "" });
 		};
 	}
 

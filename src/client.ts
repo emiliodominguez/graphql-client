@@ -120,19 +120,28 @@ interface OptimisticLayer {
 const INVALIDATION_LOG_SIZE = 64;
 
 /**
+ * State shared by every copy of the library loaded in the process (e.g. its ESM and CJS builds, or two bundled
+ * copies), so clients sharing a cache always share notifications and ordering:
+ * - `states`: shared state per cache (or per client when it has no cache);
+ * - `sequence`: monotonic counter ordering requests, writes and invalidations across every client;
+ * - `stores`: counter identifying stores.
+ */
+const registry = ((globalThis as Record<symbol, unknown>)[Symbol.for("lumenql.shared")] ??= {
+	states: new WeakMap(),
+	sequence: 0,
+	stores: 0,
+}) as { states: WeakMap<object, SharedState>; sequence: number; stores: number };
+
+/**
  * Shared state per cache (or per client when it has no cache).
  */
-const sharedStates = new WeakMap<object, SharedState>();
+const sharedStates = registry.states;
 
 /**
- * Monotonic counter ordering requests, writes and invalidations across every client.
+ * Init of every Request the client built, so `fetch` can be called as `fetch(url, init)`: fetch implementations
+ * other than the global one (node-fetch, cross-fetch, an npm `undici`) do not recognize the global Request class.
  */
-let sequence = 0;
-
-/**
- * Counter identifying stores.
- */
-let stores = 0;
+const requestInits = new WeakMap<Request, RequestInit>();
 
 /**
  * Returns the shared state of a cache, creating it on first use.
@@ -339,7 +348,7 @@ export class Client {
 			return pending as Promise<TData>;
 		}
 
-		const epoch = sequence;
+		const epoch = registry.sequence;
 		const request = this.#execute<TData, TVariables>(query, options, operation, cacheKey, writesCache);
 
 		if (!canDedupe) return request;
@@ -380,6 +389,8 @@ export class Client {
 		const operation = parseOperation(query, options.operationName);
 		const scope = createAbortScope(options.signal);
 		const context: OperationContext = { ...operation, query, variables: options.variables, attempt: 0 };
+		// Whether an incremental (`@defer` / `@stream`) result is still expecting payloads.
+		let incomplete = false;
 
 		try {
 			const { subscriptionTransport } = this.#configuration;
@@ -447,6 +458,8 @@ export class Client {
 
 				const { data, errors } = applyIncremental(state, payload);
 
+				incomplete = state.hasNext;
+
 				if (errors.length) throw createGraphQLError(response, errors, data);
 
 				// A trailing `completed`/`hasNext: false` payload changes nothing: don't yield the same result twice.
@@ -458,11 +471,15 @@ export class Client {
 
 			if (state.hasNext) {
 				// An aborted incremental result never completes as if it succeeded with partial data.
-				scope.signal.throwIfAborted();
+				if (scope.signal.aborted) throw scope.signal.reason;
 
 				throw incompleteError(response, state.data);
 			}
 		} catch (error) {
+			// The caller stopping a stream ends it quietly (like breaking out of the loop), whatever the transport,
+			// unless an incremental result would be left partial.
+			if (scope.signal.aborted && !incomplete) return;
+
 			if (!scope.signal.aborted) this.#report(error, context, options.signal);
 
 			throw error;
@@ -591,7 +608,7 @@ export class Client {
 		const cacheKey = this.#getCacheKey(target);
 
 		// In-flight responses for this entry are now older than the written data.
-		this.#supersede(cacheKey, ++sequence);
+		this.#supersede(cacheKey, ++registry.sequence);
 		await this.#store(cacheKey, data);
 	}
 
@@ -641,7 +658,7 @@ export class Client {
 		const cache = this.#configuration.cache;
 		const shared = this.#shared;
 		const inFlight = this.#inFlight;
-		const epoch = ++sequence;
+		const epoch = ++registry.sequence;
 
 		// In-flight requests started before the invalidation must neither repopulate the cache nor be joined.
 		for (const key of shared.active.keys()) {
@@ -888,11 +905,11 @@ export class Client {
 			// Let fetch set the multipart boundary.
 			headers.delete("Content-Type");
 
-			return new Request(url, { method: "POST", headers, body: upload, signal });
+			return built(url, { method: "POST", headers, body: upload, signal });
 		}
 
 		if (method === "POST") {
-			return new Request(url, { method, headers, body: JSON.stringify(payload), signal });
+			return built(url, { method, headers, body: JSON.stringify(payload), signal });
 		}
 
 		const params = new URLSearchParams();
@@ -906,7 +923,7 @@ export class Client {
 		// Params go before any `#fragment` (never sent to the server).
 		const [base = url] = url.split("#", 1);
 
-		return new Request(`${base}${base.includes("?") ? "&" : "?"}${params}`, { method, headers, signal });
+		return built(`${base}${base.includes("?") ? "&" : "?"}${params}`, { method, headers, signal });
 	}
 
 	/**
@@ -931,10 +948,29 @@ export class Client {
 			const handler = middleware[index];
 
 			if (!handler) {
-				// `fetch` consumes the body: a clone lets middleware call `next()` again (e.g. after refreshing a token).
-				// Cloning a consumed request throws: that deterministic error is never mistaken for a network failure.
+				const init = requestInits.get(current);
+
+				// Requests the client built go out as `fetch(url, init)`, the call every fetch implementation supports
+				// (node-fetch, cross-fetch, an npm `undici` with a proxy agent...), with the request's live headers.
+				// The body comes from the init, so middleware may read the request or call `next()` again.
+				if (init) {
+					const headers = new Headers(current.headers);
+
+					// The Request added a multipart boundary for its own serialization of the FormData: fetch serializes
+					// the body again, with a new boundary, so it must set the header itself.
+					if (typeof FormData !== "undefined" && init.body instanceof FormData) headers.delete("Content-Type");
+
+					return fetchFn(current.url, { ...init, method: current.method, headers, signal: current.signal }).catch(
+						rethrowNetworkFailure,
+					);
+				}
+
+				// A request built by middleware is passed as is. `fetch` consumes the body: a clone lets middleware
+				// call `next()` again. Cloning a consumed request throws: that deterministic error is never mistaken
+				// for a network failure.
 				try {
-					current = current.clone();
+					// Some polyfilled Request classes cannot clone: send the request itself then.
+					if (typeof current.clone === "function") current = current.clone();
 				} catch (error) {
 					return Promise.reject(error);
 				}
@@ -1180,8 +1216,8 @@ export class Client {
 		const { layers, writing, reading } = this.#shared;
 		const entry = layers.get(cacheKey);
 		const cache = this.#configuration.cache;
-		const epoch = sequence;
-		const token = ++stores;
+		const epoch = registry.sequence;
+		const token = ++registry.stores;
 
 		deepFreeze(data);
 		writing.set(cacheKey, token);
@@ -1365,7 +1401,7 @@ export class Client {
 
 		active.set(cacheKey, (active.get(cacheKey) ?? 0) + 1);
 
-		return ++sequence;
+		return ++registry.sequence;
 	}
 
 	/**
@@ -1409,7 +1445,7 @@ export class Client {
 	 * @returns The epoch
 	 */
 	#epoch(): number {
-		return sequence;
+		return registry.sequence;
 	}
 
 	/**
@@ -1612,7 +1648,7 @@ async function collectIncremental<TData>(
 	}
 
 	// A cancelled reader ends like a finished stream: an abort or timeout must still reject.
-	signal?.throwIfAborted();
+	if (signal?.aborted) throw signal.reason;
 
 	return {
 		data: state.data as TData | undefined,
@@ -1696,4 +1732,19 @@ function removeFrom(cache: CacheAdapter): (key: string) => unknown {
  */
 function discardBody(response: Response): void {
 	response.body?.cancel().catch(ignoreError);
+}
+
+/**
+ * Creates a Request and remembers its init.
+ *
+ * @param url - The URL
+ * @param init - The init
+ * @returns The request
+ */
+function built(url: string, init: RequestInit): Request {
+	const request = new Request(url, init);
+
+	requestInits.set(request, init);
+
+	return request;
 }

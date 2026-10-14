@@ -309,7 +309,13 @@ export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortS
 	 * Aborts with the same `TimeoutError` reason `AbortSignal.timeout` would produce.
 	 */
 	function abortOnTimeout(): void {
-		controller.abort(new DOMException(`The operation timed out after ${timeout}ms.`, "TimeoutError"));
+		const message = `The operation timed out after ${timeout}ms.`;
+
+		controller.abort(
+			typeof DOMException === "function"
+				? new DOMException(message, "TimeoutError")
+				: Object.assign(new Error(message), { name: "TimeoutError" }),
+		);
 	}
 
 	/**

@@ -10,6 +10,17 @@ import { parseOperation } from "./utils";
 const URL = "https://test.dev/graphql";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Builds a JSON Response.
  *
  * @param body - The JSON body
@@ -184,7 +195,7 @@ describe("GET requests", function () {
 
 		await client.gql({ query: "query Q { a }" }).catch(function ignore() {});
 
-		const request = fetchMock.mock.calls[0]![0] as Request;
+		const request = toRequest(...fetchMock.mock.calls[0]!);
 
 		// `${url}?${params}` (src/client.ts:838) puts the params after '#': they are never sent to the server.
 		expect(new globalThis.URL(request.url).searchParams.get("query")).toBe("query Q { a }");

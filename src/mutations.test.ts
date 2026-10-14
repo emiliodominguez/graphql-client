@@ -15,6 +15,17 @@ const ADD = "mutation Add($title: String!) { add(title: $title) }";
 const TARGET = { key: ["todos"], query: TODOS };
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Server keeping a todo list; mutations with title "boom" fail. Responses are released manually when gated.
  *
  * @param gated - Hold mutation responses until `release` is called
@@ -23,8 +34,8 @@ const TARGET = { key: ["todos"], query: TODOS };
 function server(gated = false) {
 	const todos = ["a"];
 	let release: () => void = function noop() {};
-	const fetchMock = vi.fn<typeof fetch>(async function (input) {
-		const { query, variables } = await (input as Request).clone().json();
+	const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+		const { query, variables } = await toRequest(input, init).clone().json();
 
 		if (!query.startsWith("mutation")) return Response.json({ data: { todos: [...todos] } });
 
@@ -200,8 +211,8 @@ describe("onError", function () {
 		const client = new Client({
 			url: URL,
 			onError,
-			fetch: vi.fn<typeof fetch>(async function (input) {
-				const { signal } = input as Request;
+			fetch: vi.fn<typeof fetch>(async function (input, init) {
+				const { signal } = toRequest(input, init);
 
 				if (signal.aborted) throw signal.reason;
 
@@ -244,8 +255,8 @@ describe("optimistic layers (concurrency)", function () {
 	function gatedMutations() {
 		const todos = ["a"];
 		const releases: Array<() => void> = [];
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const { query, variables } = await (input as Request).clone().json();
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const { query, variables } = await toRequest(input, init).clone().json();
 
 			if (!query.startsWith("mutation")) return Response.json({ data: { todos: [...todos] } });
 
@@ -379,8 +390,8 @@ describe("optimistic layers (review 4)", function () {
 	function gated() {
 		const todos = ["a"];
 		const releases: Array<() => void> = [];
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const { query, variables } = await (input as Request).clone().json();
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const { query, variables } = await toRequest(input, init).clone().json();
 
 			if (!query.startsWith("mutation")) return Response.json({ data: { todos: [...todos] } });
 
@@ -466,8 +477,8 @@ describe("optimistic layers (review 4)", function () {
 
 	it("fetchMore keeps pending layers as layers", async function () {
 		const { releases } = gated();
-		const pages = vi.fn<typeof fetch>(async function (input) {
-			const { query, variables } = await (input as Request).clone().json();
+		const pages = vi.fn<typeof fetch>(async function (input, init) {
+			const { query, variables } = await toRequest(input, init).clone().json();
 
 			if (query.startsWith("mutation")) {
 				await new Promise<void>(function (resolve) {

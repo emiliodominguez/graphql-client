@@ -13,6 +13,17 @@ const TODOS = "query Todos { todos }";
 const FEED = "query Feed($after: Int) { feed(after: $after) }";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Lets pending promises and 0ms timers run.
  */
 async function tick(): Promise<void> {
@@ -125,8 +136,8 @@ describe("ordering", function () {
 
 	it("an aborted newer request does not discard an older successful response", async function () {
 		let release!: () => void;
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const request = input as Request;
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const request = toRequest(input, init);
 
 			if (request.headers.get("X-Newer")) {
 				return new Promise<Response>(function (_resolve, reject) {
@@ -165,8 +176,8 @@ describe("ordering", function () {
 
 	it("fetchMore is not overwritten by an older in-flight refetch", async function () {
 		const slow: Array<() => void> = [];
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const { variables } = await (input as Request).clone().json();
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const { variables } = await toRequest(input, init).clone().json();
 			const after = variables?.after ?? 0;
 
 			if (after === 0 && fetchMock.mock.calls.length > 1) {
@@ -323,7 +334,7 @@ describe("misc", function () {
 
 		const [first, second] = await Promise.all(
 			fetchMock.mock.calls.map(function (call) {
-				return (call[0] as Request).json();
+				return toRequest(call[0], call[1]).json();
 			}),
 		);
 

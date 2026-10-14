@@ -2,6 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { Client } from "./client";
 import { containsFiles, createUploadBody, extractFiles } from "./upload";
 
+/**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
 describe("extractFiles", function () {
 	it("replaces files with null and records every path", function () {
 		const avatar = new File(["a"], "avatar.png");
@@ -37,7 +48,7 @@ describe("uploads", function () {
 
 		await client.gql({ query, variables: { file } });
 
-		const request = fetchMock.mock.calls[0]![0] as Request;
+		const request = toRequest(...fetchMock.mock.calls[0]!);
 		const form = await request.formData();
 		const uploaded = form.get("0") as File;
 

@@ -8,6 +8,17 @@ const TODOS = "query Todos { todos { id } }";
 const DEFERRED = "query User { user { id ... @defer { name } } }";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Creates a fetch mock answering with sequential `{ data: { n } }` payloads.
  *
  * @returns The fetch mock
@@ -80,7 +91,7 @@ describe("incremental delivery", function () {
 		});
 
 		const [deferred, plain] = fetchMock.mock.calls.map(function (call) {
-			return (call[0] as Request).headers.get("Accept");
+			return toRequest(call[0], call[1]).headers.get("Accept");
 		});
 
 		expect(deferred).toMatch(/^multipart\/mixed;deferSpec=20220824, application\/graphql-response\+json/);
@@ -123,7 +134,7 @@ describe("incremental delivery", function () {
 		for await (const data of createClient(fetchMock).subscribe({ query: DEFERRED })) snapshots.push(data);
 
 		expect(snapshots).toEqual([{ user: { id: 1 } }, { user: { id: 1, name: "Rick" } }]);
-		expect((fetchMock.mock.calls[0]![0] as Request).headers.get("Accept")).toBe(
+		expect(toRequest(...fetchMock.mock.calls[0]!).headers.get("Accept")).toBe(
 			"text/event-stream, multipart/mixed;deferSpec=20220824",
 		);
 	});
@@ -488,8 +499,8 @@ describe("fetchMore", function () {
 	 * @returns The fetch mock
 	 */
 	function pages() {
-		return vi.fn<typeof fetch>(async function (input) {
-			const { variables } = await (input as Request).clone().json();
+		return vi.fn<typeof fetch>(async function (input, init) {
+			const { variables } = await toRequest(input, init).clone().json();
 			const start = variables?.after ?? 0;
 
 			if (start >= 4) return Response.json({ errors: [{ message: "no more pages" }] });
@@ -524,7 +535,7 @@ describe("fetchMore", function () {
 		expect(state).toEqual({ data: { feed: [1, 2, 3, 4] }, error: undefined, loading: false });
 		expect(twin.getState().data).toEqual({ feed: [1, 2, 3, 4] });
 		expect(await client.read(options)).toEqual({ feed: [1, 2, 3, 4] });
-		expect(await (fetchMock.mock.calls[1]![0] as Request).json()).toMatchObject({ variables: { after: 2 } });
+		expect(await toRequest(...fetchMock.mock.calls[1]!).json()).toMatchObject({ variables: { after: 2 } });
 
 		for (const unsubscribe of stop) unsubscribe();
 	});

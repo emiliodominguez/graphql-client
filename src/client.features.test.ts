@@ -10,6 +10,17 @@ const UPDATE_USER = "mutation UpdateUser($id: Int!) { updateUser(id: $id) { id }
 const USER = { user: { id: 1 } };
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Builds a JSON Response.
  *
  * @param body - The JSON body
@@ -75,7 +86,9 @@ function createClient(fetchMock: typeof fetch, configuration: Partial<ClientConf
  * @returns The Request passed to fetch
  */
 function requestOf(fetchMock: ReturnType<typeof sequence>, call = 0): Request {
-	return fetchMock.mock.calls[call]![0] as Request;
+	const [input, init] = fetchMock.mock.calls[call]!;
+
+	return toRequest(input, init);
 }
 
 /**
@@ -316,8 +329,8 @@ describe("persisted queries", function () {
 	function apqServer() {
 		const known = new Set<string>();
 
-		return vi.fn<typeof fetch>(async function (input) {
-			const request = input as Request;
+		return vi.fn<typeof fetch>(async function (input, init) {
+			const request = toRequest(input, init);
 			const payload =
 				request.method === "GET"
 					? Object.fromEntries(new globalThis.URL(request.url).searchParams)
@@ -541,8 +554,8 @@ describe("subscribe", function () {
 
 describe("strict persisted queries", function () {
 	it("only ever sends the hash and fails on unknown documents", async function () {
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const body = await (input as Request).clone().json();
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const body = await toRequest(input, init).clone().json();
 
 			return body.extensions.persistedQuery.sha256Hash === "known"
 				? json({ data: USER })
@@ -562,7 +575,7 @@ describe("strict persisted queries", function () {
 
 		const bodies = await Promise.all(
 			fetchMock.mock.calls.map(function (call) {
-				return (call[0] as Request).json();
+				return toRequest(call[0], call[1]).json();
 			}),
 		);
 

@@ -10,6 +10,17 @@ import { GraphQLProvider, useLazyQuery, useQuery, useSubscription, useSuspenseQu
 const URL = "https://test.dev/graphql";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Minimal error boundary.
  */
 class Boundary extends Component<{ children: ReactNode }, { error?: Error }> {
@@ -308,8 +319,8 @@ describe("attack: useSubscription", function () {
 describe("attack: useQuery", function () {
 	it("uses the latest headers on refetch (e.g. a rotated auth token)", async function () {
 		const seen: Array<string | null> = [];
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			seen.push((input as Request).headers.get("authorization"));
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			seen.push(toRequest(input, init).headers.get("authorization"));
 			return Response.json({ data: { n: 1 } });
 		});
 		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });

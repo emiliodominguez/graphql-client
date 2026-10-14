@@ -21,6 +21,17 @@ interface HeldRequest {
 }
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Lets pending promises and 0ms timers run.
  */
 async function tick(): Promise<void> {
@@ -38,8 +49,8 @@ async function tick(): Promise<void> {
 function server() {
 	const todos = ["a"];
 	const held: HeldRequest[] = [];
-	const fetchMock = vi.fn<typeof fetch>(async function (input) {
-		const { query, variables } = await (input as Request).clone().json();
+	const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+		const { query, variables } = await toRequest(input, init).clone().json();
 		const snapshot = [...todos];
 
 		await new Promise<void>(function (resolve) {
@@ -265,14 +276,14 @@ describe("B4: rolled-back layer on an invalidated entry", function () {
 	it("disappears from a cache-first live query whose refetch failed", async function () {
 		const { fetchMock, held } = server();
 		let failNext = false;
-		const failing = vi.fn<typeof fetch>(async function (input) {
+		const failing = vi.fn<typeof fetch>(async function (input, init) {
 			if (failNext) {
 				failNext = false;
 
 				return Response.json({ errors: [{ message: "down" }] });
 			}
 
-			return fetchMock(input);
+			return fetchMock(input, init);
 		});
 		const client = new Client({ url: URL, fetch: failing, cache: new MemoryCache() });
 		const ref = client.watch<Todos>(TARGET);
@@ -393,8 +404,8 @@ describe("rolled-back layers never survive a failed refetch", function () {
 	 */
 	function server() {
 		const controls = { failQueries: false, reject: function noop(): void {} };
-		const fetchMock = vi.fn<typeof fetch>(async function (input) {
-			const { query } = await (input as Request).clone().json();
+		const fetchMock = vi.fn<typeof fetch>(async function (input, init) {
+			const { query } = await toRequest(input, init).clone().json();
 
 			if (query.startsWith("mutation")) {
 				await new Promise<void>(function (resolve) {

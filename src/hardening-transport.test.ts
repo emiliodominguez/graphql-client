@@ -40,7 +40,8 @@ describe("subscribe(): response arriving after the abort", function () {
 
 		await tick();
 		controller.abort();
-		await expect(first).rejects.toThrow();
+		// Stopping a subscription ends it quietly, whatever the transport.
+		await expect(first).resolves.toEqual({ done: true, value: undefined });
 
 		// The server answers late: nobody will ever read this event stream, so it must be closed.
 		respond(new Response(body, { headers: { "Content-Type": "text/event-stream" } }));

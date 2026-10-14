@@ -7,6 +7,17 @@ const SUBSCRIPTION = "subscription S { a }";
 const DEFERRED = "query D { a ... @defer { b } }";
 
 /**
+ * Normalizes the arguments `fetch` was called with into a Request (the client calls `fetch(url, init)`).
+ *
+ * @param input - The URL or request
+ * @param init - The request init
+ * @returns The request
+ */
+function toRequest(input: RequestInfo | URL, init?: RequestInit): Request {
+	return input instanceof Request ? input : new Request(input, init);
+}
+
+/**
  * Builds a JSON Response.
  */
 function json(body: unknown, init?: ResponseInit): Response {
@@ -49,9 +60,9 @@ function settleWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
 function nativeLikeFetch(respond: (call: number) => Response | Promise<Response>) {
 	let calls = 0;
 
-	return vi.fn<typeof fetch>(async function (input) {
+	return vi.fn<typeof fetch>(async function (input, init) {
 		// Like native fetch: throws a TypeError for a Request whose body was already used, and consumes it.
-		const request = new Request(input as Request);
+		const request = new Request(toRequest(input, init));
 
 		await request.text();
 		request.signal.throwIfAborted();
@@ -70,13 +81,16 @@ describe("transport: retries", function () {
 		const reads = vi.fn();
 		const client = new Client({
 			url: URL,
-			// The real fetch rejects ("Request object that has already been used") before any network I/O.
+			// A request built by middleware is passed to fetch as is: once its body was read, it can be neither cloned
+			// nor sent ("Request object that has already been used"), which fails before any network I/O.
 			fetch: globalThis.fetch,
 			retry: { attempts: 3, delay: 0 },
 			middleware: [
 				async function (request, next) {
-					reads(await request.text());
-					return next();
+					const rebuilt = new Request(request);
+
+					reads(await rebuilt.text());
+					return next(rebuilt);
 				},
 			],
 		});
@@ -146,8 +160,8 @@ describe("transport: timeouts", function () {
 	it("does not fire a large finite timeout (> 2^31-1 ms) immediately", async function () {
 		const client = new Client({
 			url: URL,
-			fetch: vi.fn<typeof fetch>(function (input) {
-				const { signal } = input as Request;
+			fetch: vi.fn<typeof fetch>(function (input, init) {
+				const { signal } = toRequest(input, init);
 
 				return new Promise<Response>(function (resolve, reject) {
 					const timer = setTimeout(function () {

@@ -16,7 +16,8 @@ export interface RetryPolicy {
 /**
  * Errors raised by `fetch` itself, as opposed to errors thrown while preparing the request.
  */
-const networkFailures = new WeakSet<object>();
+const networkFailures: WeakSet<object> = ((globalThis as Record<symbol, unknown>)[Symbol.for("lumenql.networkFailures")] ??=
+	new WeakSet<object>()) as WeakSet<object>;
 
 /**
  * Marks an error raised by `fetch` as a network failure (retryable by default) and rethrows it.

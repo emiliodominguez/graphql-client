@@ -291,11 +291,14 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 		if (entry?.failed) {
 			// Kept briefly: React retries a failed render once more (in a later task), which must rethrow the same error
 			// instead of sending another request. A boundary reset after that starts a fresh request.
-			setTimeout(function forgetFailure(): void {
+			const timer = setTimeout(function forgetFailure(): void {
 				if (requests.get(identity) === entry) requests.delete(identity);
 
 				entry.release();
 			}, FAILURE_RETENTION);
+
+			// Bookkeeping only: never keep a Node process alive.
+			(timer as { unref?: () => void }).unref?.();
 			throw entry.error;
 		}
 
@@ -778,11 +781,22 @@ function startSuspenseRequest(
 			entry.failed = state.data === undefined;
 			entry.error = state.error;
 			resolve();
-			setTimeout(function expire(): void {
+			const timer = setTimeout(function expire(): void {
 				if (requests.get(identity) === entry) requests.delete(identity);
 
 				entry.release();
 			}, SUSPENSE_RETENTION);
+
+			// Bookkeeping only: never keep a Node process (SSR, scripts, tests) alive.
+			(timer as { unref?: () => void }).unref?.();
+			// On the server no component ever takes over (effects never run): stop background work (polling) now,
+			// keeping the settled ref (and its state) for the render retrying after the suspension.
+			// (`release` is read late: settling may happen synchronously, before `subscribe` returned it.)
+			if (typeof document === "undefined") {
+				void Promise.resolve().then(function releaseOnServer(): void {
+					entry.release();
+				});
+			}
 		}
 
 		entry.release = ref.subscribe(observe);
