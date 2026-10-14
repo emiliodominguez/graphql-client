@@ -17,6 +17,8 @@ export interface QueryWatcher<TData> {
 	receive(data: TData): void;
 	/** The key was invalidated */
 	invalidate(): void;
+	/** The data currently held by the watcher */
+	current(): TData | undefined;
 }
 
 /**
@@ -217,6 +219,9 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 				receive(data: TData): void {
 					ref.fetched = true;
 					ref.setState({ data, error: undefined, loading: ref.state.loading });
+				},
+				current(): TData | undefined {
+					return ref.state.data;
 				},
 				invalidate(): void {
 					ref.stale = true;

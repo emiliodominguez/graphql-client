@@ -635,3 +635,64 @@ describe("regressions", function () {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 });
+
+describe("keepPreviousData", function () {
+	it("keeps showing the previous data while new variables load", async function () {
+		const releases: Array<() => void> = [];
+		const fetchMock = vi.fn<typeof fetch>(async function (input) {
+			const { variables } = await (input as Request).json();
+
+			if (variables.page > 1) {
+				await new Promise<void>(function (resolve) {
+					releases.push(resolve);
+				});
+			}
+
+			return Response.json({ data: { page: variables.page } });
+		});
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+		let setPage!: (page: number) => void;
+
+		/**
+		 * Paginated view.
+		 *
+		 * @returns The element
+		 */
+		function Pages() {
+			const [page, set] = useState(1);
+			const { data, isPreviousData } = useQuery<{ page: number }>({
+				query: "query P($page: Int) { page(n: $page) }",
+				variables: { page },
+				keepPreviousData: true,
+			});
+
+			setPage = set;
+
+			return <span data-testid="page">{`${data?.page ?? "-"}:${isPreviousData}`}</span>;
+		}
+
+		render(
+			<GraphQLProvider client={client}>
+				<Pages />
+			</GraphQLProvider>,
+		);
+
+		await waitFor(function () {
+			expect(screen.getByTestId("page").textContent).toBe("1:false");
+		});
+
+		await act(async function () {
+			setPage(2);
+		});
+
+		expect(screen.getByTestId("page").textContent).toBe("1:true");
+
+		await act(async function () {
+			releases[0]!();
+		});
+
+		await waitFor(function () {
+			expect(screen.getByTestId("page").textContent).toBe("2:false");
+		});
+	});
+});

@@ -27,7 +27,7 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 - **Deduplication and race safety.** Identical in-flight queries share one request, and the last request for a cache key always wins.
 - **Hierarchical invalidation.** `invalidate(["user"])` drops `["user", 1]`, `["user", 2, "posts"]` and so on. Mutations can do this declaratively with `invalidates`.
 - **Live queries.** `client.watch()` refetches on invalidation, polling, focus and reconnect, and keeps showing stale data while it revalidates.
-- **Optimistic updates.** `client.write()` pushes data to every component watching that entry.
+- **Optimistic updates.** The `optimistic` option updates the UI immediately and rolls back automatically on failure. `client.write()` pushes data to every component watching an entry.
 - **SSR.** `extract()` and `restore()` move the cache from server to browser, and hooks render cached data on the server.
 
 **DX**
@@ -151,20 +151,27 @@ Any watched query (live query or React hook) under an invalidated prefix refetch
 
 ### Optimistic updates
 
-`read` and `write` work on the same fields as a request. `write` updates every watcher of that entry immediately:
+Pass `optimistic` updates to update the UI immediately. If the operation fails, every update is rolled back automatically:
 
 ```ts
-const target = { key: ["todos"], query: TODOS };
-const previous = await client.read(target);
+import { optimistic } from "@emiliodominguez/graphql-client";
 
-await client.write(target, { todos: [...previous.todos, draft] }); // instant UI
-
-try {
-	await client.gql({ query: ADD_TODO, variables: { draft }, invalidates: [["todos"]] }); // reconcile with the server
-} catch (error) {
-	await client.write(target, previous); // roll back
-}
+await client.gql({
+	query: ADD_TODO,
+	variables: { title },
+	optimistic: [
+		optimistic({ key: ["todos"], query: TODOS }, function addTodo(current) {
+			return { todos: [...(current?.todos ?? []), { id: "temp", title }] }; // typed from TODOS
+		}),
+	],
+	invalidates: [["todos"]], // then reconcile with the server
+});
 ```
+
+- `optimistic(target, update)` infers types from the target's document. `current` is the cached data, or a live query's data when there's no cache.
+- On failure, previous data is restored, newest update first. An entry that didn't exist before is dropped, and its watchers refetch.
+- `useMutation(ADD_TODO, { optimistic: [...] })` works the same way.
+- `read` and `write` are available for fully manual updates. `write` notifies every watcher of the entry.
 
 ### Persistent cache
 
@@ -296,13 +303,13 @@ function Todos() {
 }
 ```
 
-| Hook                              | Purpose                                                                                                                                                    |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `useQuery(options)`               | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, supports `skip`. `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
-| `useSuspenseQuery(options)`       | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                |
-| `useMutation(document, options?)` | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                          |
-| `useSubscription(options)`        | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                 |
-| `useClient()`                     | The client from context.                                                                                                                                   |
+| Hook                              | Purpose                                                                                                                                                                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useQuery(options)`               | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, and supports `skip` and `keepPreviousData` (no empty flash when variables change). `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
+| `useSuspenseQuery(options)`       | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                                                                                  |
+| `useMutation(document, options?)` | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                                                                                            |
+| `useSubscription(options)`        | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                                                                                   |
+| `useClient()`                     | The client from context.                                                                                                                                                                                                     |
 
 Components using the same entry share one request, and invalidations and `write()` re-render every consumer. React is an optional peer dependency (≥ 18).
 
@@ -489,27 +496,40 @@ try {
 }
 ```
 
+Use `onError` to handle failures in one place, such as reporting them or signing out on 401. It's called once per failed operation, after retries, and never for operations the caller aborted:
+
+```ts
+const client = new Client({
+	url,
+	onError(error, { type, name }) {
+		if (isClientError(error) && error.status === 401) auth.signOut();
+		reporter.capture(error, { operation: `${type} ${name}` });
+	},
+});
+```
+
 The client throws a `ClientError` when the response contains GraphQL `errors`, when the status is not 2xx (errors in the body are still parsed), when the body is not valid JSON, or when `data` is missing. The library never writes to the console unless `debug: true` is set.
 
 ## API
 
 ### `new Client(configuration)`
 
-| Option                  | Type                                             | Default            | Description                                     |
-| ----------------------- | ------------------------------------------------ | ------------------ | ----------------------------------------------- |
-| `url`                   | `string`                                         | (required)         | GraphQL endpoint.                               |
-| `authToken`             | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.        |
-| `headers`               | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                |
-| `cache`                 | `Cache`                                          | none (no caching)  | Result cache.                                   |
-| `fetch`                 | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch for SSR, tests or instrumentation. |
-| `timeout`               | `number` (ms)                                    | none               | Default request timeout.                        |
-| `dedupe`                | `boolean`                                        | `true`             | Share in-flight identical queries.              |
-| `retry`                 | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).          |
-| `middleware`            | `Middleware[]`                                   | `[]`               | Request/response middleware.                    |
-| `method`                | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                        |
-| `persistedQueries`      | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                    |
-| `subscriptionTransport` | `SubscriptionTransport`                          | SSE over `fetch`   | Transport for `subscription` operations.        |
-| `debug`                 | `boolean`                                        | `false`            | Log operations, timings and cache hits.         |
+| Option                  | Type                                             | Default            | Description                                                                                 |
+| ----------------------- | ------------------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------- |
+| `url`                   | `string`                                         | (required)         | GraphQL endpoint.                                                                           |
+| `authToken`             | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.                                                    |
+| `headers`               | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                                                            |
+| `cache`                 | `Cache`                                          | none (no caching)  | Result cache.                                                                               |
+| `fetch`                 | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch for SSR, tests or instrumentation.                                             |
+| `timeout`               | `number` (ms)                                    | none               | Default request timeout.                                                                    |
+| `dedupe`                | `boolean`                                        | `true`             | Share in-flight identical queries.                                                          |
+| `retry`                 | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).                                                      |
+| `middleware`            | `Middleware[]`                                   | `[]`               | Request/response middleware.                                                                |
+| `method`                | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                                                                    |
+| `persistedQueries`      | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                                                                |
+| `subscriptionTransport` | `SubscriptionTransport`                          | SSE over `fetch`   | Transport for `subscription` operations.                                                    |
+| `onError`               | `(error, context) => void`                       | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401. |
+| `debug`                 | `boolean`                                        | `false`            | Log operations, timings and cache hits.                                                     |
 
 ### Methods
 
@@ -533,6 +553,7 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 | `key`           | `(string \| number \| boolean \| null)[]` | Hierarchical cache key for grouping and invalidation.             |
 | `fetchPolicy`   | `FetchPolicy`                             | See [Caching](#caching).                                          |
 | `invalidates`   | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
+| `optimistic`    | `OptimisticUpdate[]`                      | Cache updates applied immediately and rolled back on failure.     |
 | `headers`       | `HeadersInit`                             | Per-call headers. Calls with these are not deduplicated.          |
 | `signal`        | `AbortSignal`                             | Per-call abort signal. Calls with one are not deduplicated.       |
 | `timeout`       | `number` (ms)                             | Per-call timeout, overrides the client default. Not deduplicated. |
@@ -542,7 +563,7 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 - `new MemoryCache({ ttl?, maxSize? })`: O(1) LRU. `ttl` defaults to 60 s and accepts `Infinity`. `maxSize` defaults to 100.
 - `new StorageCache({ storage?, prefix?, ttl? })`: Web Storage–backed. Defaults to `localStorage`, `"gql:"` and 24 h.
-- `graphql` tag, `minify(document)`, `dedupeFragments(document)`, `isClientError(error)`, `isRetryable(error, context)`.
+- `optimistic(target, update)`, `graphql` tag, `minify(document)`, `dedupeFragments(document)`, `isClientError(error)`, `isRetryable(error, context)`.
 
 ## Size
 
@@ -550,8 +571,8 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                  | Size    |
 | --------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken)  | ~6.8 kB |
-| `@emiliodominguez/graphql-client/react` | ~1.3 kB |
+| `Client` + `MemoryCache` (tree-shaken)  | ~7.1 kB |
+| `@emiliodominguez/graphql-client/react` | ~1.4 kB |
 | `@emiliodominguez/graphql-client/ws`    | ~1.5 kB |
 
 ## Development

@@ -21,6 +21,7 @@ import type {
 	GraphQLResponse,
 	MaybePromise,
 	OperationContext,
+	OptimisticUpdate,
 	RequestOptions,
 	SubscribeOptions,
 	WatchOptions,
@@ -158,7 +159,7 @@ export class Client {
 	async gql<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		options: RequestOptions<TData, TVariables>,
 	): Promise<TData> {
-		const { cache, dedupe = true } = this.configuration;
+		const { cache } = this.configuration;
 		const query = String(options.query);
 		const operation = parseOperation(query, options.operationName);
 		const isQuery = operation.type === "query";
@@ -178,8 +179,45 @@ export class Client {
 		}
 
 		if (fetchPolicy === "cache-only") {
-			throw new Error(`No cached data for ${operation.type} ${operation.name ?? "(anonymous)"} (cache-only).`);
+			const error = new Error(`No cached data for ${operation.type} ${operation.name ?? "(anonymous)"} (cache-only).`);
+
+			this.report(error, { ...operation, query, variables: options.variables, attempt: 0 }, options.signal);
+			throw error;
 		}
+
+		const rollback = options.optimistic?.length ? await this.applyOptimistic(options.optimistic) : undefined;
+
+		try {
+			return await this.request<TData, TVariables>(query, options, operation, cacheKey, fetchPolicy, hasFiles);
+		} catch (error) {
+			await rollback?.();
+			throw error;
+		}
+	}
+
+	/**
+	 * Runs a network request, sharing identical in-flight queries.
+	 *
+	 * @template TData - The shape of the `data` field in the response
+	 * @template TVariables - The shape of the operation variables
+	 * @param query - The GraphQL document
+	 * @param options - The request options
+	 * @param operation - The parsed operation info
+	 * @param cacheKey - Key identifying the result
+	 * @param fetchPolicy - The effective fetch policy
+	 * @param hasFiles - Whether the variables carry files
+	 * @returns The `data` field of the GraphQL response
+	 */
+	private async request<TData, TVariables>(
+		query: string,
+		options: RequestOptions<TData, TVariables>,
+		operation: OperationInfo,
+		cacheKey: string,
+		fetchPolicy: FetchPolicy,
+		hasFiles: boolean,
+	): Promise<TData> {
+		const { dedupe = true } = this.configuration;
+		const isQuery = operation.type === "query";
 
 		// Calls carrying their own signal, headers, timeout or retry policy may legitimately diverge,
 		// so they never share a request.
@@ -286,6 +324,10 @@ export class Client {
 				if (errors.length) throw createGraphQLError(response, errors, data);
 				if (data !== undefined) yield data as TData;
 			}
+		} catch (error) {
+			if (!scope.signal.aborted) this.report(error, context, options.signal);
+
+			throw error;
 		} finally {
 			scope.abort();
 			scope.dispose();
@@ -523,6 +565,7 @@ export class Client {
 					return data;
 				} catch (error) {
 					if (scope.signal.aborted || !policy || attempt >= policy.attempts || !policy.retryIf(error, context)) {
+						this.report(error, context, options.signal);
 						throw error;
 					}
 
@@ -791,6 +834,78 @@ export class Client {
 		}
 
 		return data;
+	}
+
+	/**
+	 * Applies optimistic updates and returns their rollback.
+	 *
+	 * @param updates - The optimistic updates
+	 * @returns Restores every updated entry, newest first
+	 */
+	private async applyOptimistic(updates: ReadonlyArray<OptimisticUpdate<unknown, unknown>>): Promise<() => Promise<void>> {
+		const client = this;
+		const applied: Array<{ target: CacheTarget<unknown, unknown>; previous: unknown }> = [];
+
+		for (const { target, update } of updates) {
+			const cached = await this.read<unknown, Record<string, unknown>>(
+				target as CacheTarget<unknown, Record<string, unknown>>,
+			);
+			// Without a cache (or on a miss), live queries showing the entry still hold its current data.
+			const previous = cached ?? this.peekWatchers(this.getCacheKey(target));
+
+			await this.write(target as CacheTarget<unknown, Record<string, unknown>>, update(previous));
+			applied.push({ target, previous });
+		}
+
+		return async function rollback(): Promise<void> {
+			for (const { target, previous } of applied.reverse()) {
+				if (previous !== undefined) {
+					await client.write(target as CacheTarget<unknown, Record<string, unknown>>, previous);
+					continue;
+				}
+
+				// Nothing to restore: drop the optimistic entry and let its watchers refetch the real data.
+				const cacheKey = client.getCacheKey(target);
+
+				client.supersede(cacheKey, ++sequence);
+				await client.configuration.cache?.delete(cacheKey);
+
+				for (const watcher of [...(client.shared.watchers.get(cacheKey) ?? [])]) watcher.invalidate();
+			}
+		};
+	}
+
+	/**
+	 * Returns the data held by the first watcher of a cache key that has some.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @returns The data, or `undefined`
+	 */
+	private peekWatchers(cacheKey: string): unknown {
+		for (const watcher of this.shared.watchers.get(cacheKey) ?? []) {
+			const data = watcher.current();
+
+			if (data !== undefined) return data;
+		}
+
+		return undefined;
+	}
+
+	/**
+	 * Forwards a failure to the `onError` hook, unless the caller aborted the operation.
+	 *
+	 * @param error - The failure
+	 * @param context - The operation metadata
+	 * @param signal - The caller's abort signal
+	 */
+	private report(error: unknown, context: OperationContext, signal: AbortSignal | undefined): void {
+		if (signal?.aborted || !this.configuration.onError) return;
+
+		try {
+			this.configuration.onError(error, context);
+		} catch {
+			// A failing error reporter must never mask the original error.
+		}
 	}
 
 	/**

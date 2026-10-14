@@ -76,6 +76,11 @@ export interface GraphQLProviderProps {
 export interface UseQueryOptions<TData, TVariables> extends WatchOptions<TData, TVariables> {
 	/** Skip the query entirely (no fetch, no subscription) */
 	skip?: boolean;
+	/**
+	 * While the variables (or document) change, keep showing the previous data until the new data arrives,
+	 * instead of an empty loading state. `isPreviousData` tells when it is shown.
+	 */
+	keepPreviousData?: boolean;
 }
 
 /**
@@ -89,6 +94,8 @@ export interface UseQueryResult<TData, TVariables = Record<string, unknown>> ext
 	refetch(): Promise<QueryState<TData>>;
 	/** Fetches another page and merges it into the data (pagination). Never rejects. */
 	fetchMore(options: FetchMoreOptions<TData, TVariables>): Promise<QueryState<TData>>;
+	/** Whether `data` belongs to the previous variables (see `keepPreviousData`) */
+	isPreviousData: boolean;
 }
 
 /**
@@ -200,12 +207,23 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
 		skip ? getSkippedState : ref.getState,
 		skip ? getSkippedState : ref.getState,
 	);
+	const previousData = useRef<TData | undefined>(undefined);
+	const showPrevious = options.keepPreviousData === true && state.data === undefined && previousData.current !== undefined;
+
+	useEffect(
+		function rememberData(): void {
+			if (state.data !== undefined) previousData.current = state.data;
+		},
+		[state.data],
+	);
 
 	return useMemo(
 		function createResult(): UseQueryResult<TData, TVariables> {
-			return { ...state, refetch: ref.refetch, fetchMore: ref.fetchMore };
+			const data = showPrevious ? previousData.current : state.data;
+
+			return { ...state, data, isPreviousData: showPrevious, refetch: ref.refetch, fetchMore: ref.fetchMore };
 		},
-		[state, ref],
+		[state, ref, showPrevious],
 	);
 }
 
@@ -256,7 +274,7 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 		throw (entry ?? startSuspenseRequest(requests, identity, ref as QueryRef<unknown, unknown>)).promise;
 	}
 
-	return { ...state, data: state.data, refetch: ref.refetch, fetchMore: ref.fetchMore };
+	return { ...state, data: state.data, isPreviousData: false, refetch: ref.refetch, fetchMore: ref.fetchMore };
 }
 
 /**

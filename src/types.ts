@@ -135,6 +135,11 @@ export interface ClientConfiguration {
 	/** Automatic Persisted Queries: send a SHA-256 hash first and the full document only when the server asks. */
 	persistedQueries?: boolean | PersistedQueriesOptions;
 	/**
+	 * Called once for every failed operation (after retries), e.g. to report errors or sign out on 401.
+	 * Not called when the caller aborted the operation. Errors thrown by the hook are ignored.
+	 */
+	onError?: (error: unknown, context: OperationContext) => void;
+	/**
 	 * Transport for `subscription` operations (e.g. the WebSocket transport from `/ws`).
 	 * Defaults to GraphQL over SSE through `fetch`.
 	 */
@@ -260,6 +265,29 @@ export interface RequestOptions<TData, TVariables> {
 	retry?: number | RetryOptions | false;
 	/** Cache key prefixes to invalidate once the operation succeeds (typically after a mutation). */
 	invalidates?: ReadonlyArray<CacheKey>;
+	/**
+	 * Cache entries to update immediately, before the server answers. Every update is rolled back if the operation
+	 * fails. Build entries with {@link optimistic} for full typing; pair with `invalidates` to reconcile.
+	 */
+	optimistic?: ReadonlyArray<OptimisticUpdate<unknown, unknown>>;
+}
+
+/**
+ * An optimistic cache update. See {@link RequestOptions.optimistic}.
+ *
+ * @template TData - The shape of the entry's data
+ * @template TVariables - The shape of the entry's variables
+ */
+export interface OptimisticUpdate<TData, TVariables> {
+	/** The cache entry to update */
+	target: CacheTarget<TData, TVariables>;
+	/**
+	 * Computes the optimistic data.
+	 *
+	 * @param current - The cached data, or `undefined` when the entry is not cached
+	 * @returns The data to show until the server answers
+	 */
+	update(current: TData | undefined): TData;
 }
 
 /**

@@ -4,6 +4,9 @@
 
 ### Added
 
+- Optimistic updates: the `optimistic` option and the typed `optimistic(target, update)` helper, with automatic rollback.
+- An `onError` hook, called once per failed operation after retries.
+- `keepPreviousData` and `isPreviousData` for `useQuery`.
 - Pagination with `fetchMore` on `QueryRef`, `useQuery` and `useSuspenseQuery`. It merges pages and writes the result to the cache entry.
 - `QueryRef` follows the Svelte store contract, and the README has recipes for Svelte, Vue and Solid.
 - `yarn verify` runs the full CI sequence locally. It is also used by `prepublishOnly`.
