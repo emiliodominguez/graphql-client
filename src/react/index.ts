@@ -234,7 +234,7 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
 ): UseQueryResult<TData, TVariables> {
 	const ref = useQueryRef(options);
 
-	return useQueryRefResult(options.skip === true ? undefined : ref, options.keepPreviousData === true);
+	return useQueryRefResult(useClient(), options.skip === true ? undefined : ref, options.keepPreviousData === true);
 }
 
 /**
@@ -247,7 +247,7 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
  * @returns The query state with defined `data`
  */
 export function useSuspenseQuery<TData = unknown, TVariables extends object = Record<string, unknown>>(
-	options: WithVariables<Omit<UseQueryOptions<TData, TVariables>, "skip">, TVariables>,
+	options: WithVariables<Omit<UseQueryOptions<TData, TVariables>, "skip" | "keepPreviousData">, TVariables>,
 ): UseSuspenseQueryResult<TData, TVariables> {
 	const client = useClient();
 	const identity = getIdentity(options);
@@ -400,9 +400,12 @@ export interface UseLazyQueryResult<TData, TVariables> extends UseQueryResult<TD
  * Calling `execute` again with other variables switches the query (with `keepPreviousData`, the old data stays
  * visible meanwhile).
  *
+ * `execute` resolves with the data of the first fetch and rejects with its error (also exposed in `error`), like
+ * `mutate`: handle or ignore the rejection.
+ *
  * @example
  * const [search, { data, loading, called }] = useLazyQuery(SEARCH, { keepPreviousData: true });
- * // <button onClick={function () { search({ term }); }}>Search</button>
+ * // <button onClick={function () { search({ term }).catch(function ignore() {}); }}>Search</button>
  *
  * @template TData - The shape of the `data` field
  * @template TVariables - The shape of the operation variables
@@ -419,7 +422,7 @@ export function useLazyQuery<TData = unknown, TVariables extends object = Record
 	const [executed, setExecuted] = useState<LazyExecution<TData, TVariables> | undefined>(undefined);
 	// A query executed with another client or document (e.g. after a logout) no longer belongs to this hook.
 	const ref = executed?.client === client && executed.query === String(query) ? executed.ref : undefined;
-	const result = useQueryRefResult(ref, options?.keepPreviousData === true);
+	const result = useQueryRefResult(client, ref, options?.keepPreviousData === true);
 
 	const execute = useCallback(
 		function execute(variables?: TVariables): Promise<TData> {
@@ -534,11 +537,13 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
  *
  * @template TData - The shape of the `data` field
  * @template TVariables - The shape of the operation variables
+ * @param client - The client the live query belongs to
  * @param ref - The live query, or `undefined` when skipped / not executed yet
  * @param keepPreviousData - Keep showing the last data while a new query loads
  * @returns The hook result
  */
 function useQueryRefResult<TData, TVariables>(
+	client: Client,
 	ref: QueryRef<TData, TVariables> | undefined,
 	keepPreviousData: boolean,
 ): UseQueryResult<TData, TVariables> {
@@ -547,23 +552,24 @@ function useQueryRefResult<TData, TVariables>(
 		ref ? ref.getState : getSkippedState,
 		ref ? ref.getState : getSkippedState,
 	);
-	const previousData = useRef<TData | undefined>(undefined);
+	// Remembered with the client it came from: after a client swap (e.g. a logout), another user's data is never shown.
+	const previous = useRef<{ client: Client; data: TData } | undefined>(undefined);
 	// Skipped or idle queries show the idle state, never stale data.
 	const showPrevious =
-		keepPreviousData && ref !== undefined && state.data === undefined && previousData.current !== undefined;
+		keepPreviousData && ref !== undefined && state.data === undefined && previous.current?.client === client;
 
 	useEffect(
 		function rememberData(): void {
-			if (state.data !== undefined) previousData.current = state.data;
+			if (state.data !== undefined) previous.current = { client, data: state.data };
 		},
-		[state.data],
+		[client, state.data],
 	);
 
 	return useMemo(
 		function createResult(): UseQueryResult<TData, TVariables> {
 			return {
 				...state,
-				data: showPrevious ? previousData.current : state.data,
+				data: showPrevious ? previous.current!.data : state.data,
 				isPreviousData: showPrevious,
 				refetch: ref ? ref.refetch : resolveIdle,
 				fetchMore: ref ? ref.fetchMore : resolveIdle,
@@ -593,8 +599,11 @@ function firstSettled<TData>(ref: QueryRef<TData, unknown>): Promise<TData> {
 		function settle(state: QueryState<TData>): boolean {
 			if (state.loading) return false;
 
-			if (state.error !== undefined || state.data === undefined) reject(state.error);
-			else resolve(state.data);
+			if (state.error !== undefined || state.data === undefined) {
+				reject(state.error ?? new Error("The query settled without data."));
+			} else {
+				resolve(state.data);
+			}
 
 			unsubscribe?.();
 			return true;
@@ -791,8 +800,9 @@ function startSuspenseRequest(
 			(timer as { unref?: () => void }).unref?.();
 			// On the server no component ever takes over (effects never run): stop background work (polling) now,
 			// keeping the settled ref (and its state) for the render retrying after the suspension.
-			// (`release` is read late: settling may happen synchronously, before `subscribe` returned it.)
-			if (typeof document === "undefined") {
+			// (`release` is read late: settling may happen synchronously, before `subscribe` returned it.) React Native
+			// has no `document` but defines `window`: it is a client.
+			if (typeof window === "undefined") {
 				void Promise.resolve().then(function releaseOnServer(): void {
 					entry.release();
 				});

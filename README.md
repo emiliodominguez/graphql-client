@@ -231,6 +231,8 @@ const redisCache: Cache = {
 };
 ```
 
+The client runs cache operations one at a time per key, whatever order an async adapter completes them in. So every call must settle (a rejection is fine: a failed `set` or `delete` makes the key read as a miss until a later write succeeds), and an adapter must never wait on the client for the same key from inside a call, or that key deadlocks.
+
 ## Live queries
 
 `client.watch()` returns an observable query that works with any framework:
@@ -328,14 +330,14 @@ function Todos() {
 }
 ```
 
-| Hook                               | Purpose                                                                                                                                                                                                                      |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `useQuery(options)`                | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, and supports `skip` and `keepPreviousData` (no empty flash when variables change). `useSyncExternalStore`-based, so it's tearing-free and SSR-safe. |
-| `useSuspenseQuery(options)`        | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                                                                                  |
-| `useLazyQuery(document, options?)` | Returns `[execute, state]`. Nothing is fetched until `execute(variables)` runs, and from then on the result is live like `useQuery`. Supports `keepPreviousData`.                                                            |
-| `useMutation(document, options?)`  | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                                                                                            |
-| `useSubscription(options)`         | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                                                                                   |
-| `useClient()`                      | The client from context.                                                                                                                                                                                                     |
+| Hook                               | Purpose                                                                                                                                                                                                                                          |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `useQuery(options)`                | Live query built on `client.watch()`. Returns `refetch` and `fetchMore`, and supports `skip` and `keepPreviousData` (no empty flash when variables change). `useSyncExternalStore`-based, so it's tearing-free and SSR-safe.                     |
+| `useSuspenseQuery(options)`        | Suspends until data is available and throws errors to the nearest error boundary. `data` is always defined.                                                                                                                                      |
+| `useLazyQuery(document, options?)` | Returns `[execute, state]`. Nothing is fetched until `execute(variables)` runs, and from then on the result is live like `useQuery`. `execute` resolves with the data and rejects with the error (also in `error`). Supports `keepPreviousData`. |
+| `useMutation(document, options?)`  | Returns `[mutate, { data, error, loading, reset }]`. `mutate` rejects on failure.                                                                                                                                                                |
+| `useSubscription(options)`         | Streams SSE subscriptions or `@defer` queries while mounted. Supports `onData` and `skip`.                                                                                                                                                       |
+| `useClient()`                      | The client from context.                                                                                                                                                                                                                         |
 
 Components using the same entry share one request, and invalidations and `write()` re-render every consumer. React is an optional peer dependency (≥ 18).
 
@@ -365,7 +367,7 @@ const client = new Client({
   authToken: async function getToken() {
     return (await auth.getSession())?.accessToken; // evaluated per request; nullish skips the header
   },
-  headers: { "X-Client": "web" }, // any HeadersInit, or a (sync/async) function returning one
+  headers: { "X-Client": "web" }, // any HeadersLike (HeadersInit), or a (sync/async) function returning one
 });
 
 await client.gql({ query, headers: { "X-Request-Id": crypto.randomUUID() } }); // per-call headers
@@ -541,28 +543,28 @@ const client = new Client({
 });
 ```
 
-The client throws a `ClientError` when the response contains GraphQL `errors`, when the status is not 2xx (errors in the body are still parsed), when the body is not valid JSON, or when `data` is missing. The library never writes to the console unless `debug: true` is set.
+The client throws a `ClientError` when the response contains GraphQL `errors`, when the status is not 2xx (errors in the body are still parsed), when the body is not valid JSON, or when `data` is missing. The library only writes to the console with `debug: true`, or through `console.error` when a live-query listener throws and no `onError` is set.
 
 ## API
 
 ### `new Client(configuration)`
 
-| Option                  | Type                                             | Default            | Description                                                                                                                       |
-| ----------------------- | ------------------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `url`                   | `string`                                         | (required)         | GraphQL endpoint.                                                                                                                 |
-| `authToken`             | `string \| () => MaybePromise<string \| null>`   | none               | Sent as `Authorization: Bearer <token>`.                                                                                          |
-| `headers`               | `HeadersInit \| () => MaybePromise<HeadersInit>` | none               | Extra headers for every request.                                                                                                  |
-| `cache`                 | `Cache`                                          | none (no caching)  | Result cache.                                                                                                                     |
-| `fetch`                 | `typeof fetch`                                   | `globalThis.fetch` | Custom fetch (SSR, tests, a proxy agent). Called as `fetch(url, init)`, so node-fetch, cross-fetch or an npm `undici` work as is. |
-| `timeout`               | `number` (ms)                                    | none               | Default request timeout.                                                                                                          |
-| `dedupe`                | `boolean`                                        | `true`             | Share in-flight identical queries.                                                                                                |
-| `retry`                 | `number \| RetryOptions`                         | none               | Retry policy. See [Retries](#retries).                                                                                            |
-| `middleware`            | `Middleware[]`                                   | `[]`               | Request/response middleware.                                                                                                      |
-| `method`                | `"POST" \| "GET"`                                | `"POST"`           | HTTP method for queries.                                                                                                          |
-| `persistedQueries`      | `boolean \| { hash }`                            | `false`            | Automatic Persisted Queries.                                                                                                      |
-| `subscriptionTransport` | `SubscriptionTransport`                          | SSE over `fetch`   | Transport for `subscription` operations.                                                                                          |
-| `onError`               | `(error, context) => void`                       | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401.                                       |
-| `debug`                 | `boolean`                                        | `false`            | Log operations, timings and cache hits.                                                                                           |
+| Option                  | Type                                           | Default            | Description                                                                                                                                                          |
+| ----------------------- | ---------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`                   | `string`                                       | (required)         | GraphQL endpoint.                                                                                                                                                    |
+| `authToken`             | `string \| () => MaybePromise<string \| null>` | none               | Sent as `Authorization: Bearer <token>`.                                                                                                                             |
+| `headers`               | `HeadersResolver`                              | none               | Extra headers for every request.                                                                                                                                     |
+| `cache`                 | `Cache`                                        | none (no caching)  | Result cache.                                                                                                                                                        |
+| `fetch`                 | `typeof fetch`                                 | `globalThis.fetch` | Custom fetch (SSR, tests, a proxy agent). Called as `fetch(url, init)` (requests built by middleware too), so node-fetch, cross-fetch or an npm `undici` work as is. |
+| `timeout`               | `number` (ms)                                  | none               | Default request timeout.                                                                                                                                             |
+| `dedupe`                | `boolean`                                      | `true`             | Share in-flight identical queries.                                                                                                                                   |
+| `retry`                 | `number \| RetryOptions`                       | none               | Retry policy. See [Retries](#retries).                                                                                                                               |
+| `middleware`            | `Middleware[]`                                 | `[]`               | Request/response middleware.                                                                                                                                         |
+| `method`                | `"POST" \| "GET"`                              | `"POST"`           | HTTP method for queries.                                                                                                                                             |
+| `persistedQueries`      | `boolean \| { hash?, strict? }`                | `false`            | Automatic Persisted Queries.                                                                                                                                         |
+| `subscriptionTransport` | `SubscriptionTransport`                        | SSE over `fetch`   | Transport for `subscription` operations.                                                                                                                             |
+| `onError`               | `(error, context) => void`                     | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401.                                                                          |
+| `debug`                 | `boolean`                                      | `false`            | Log operations, timings and cache hits.                                                                                                                              |
 
 ### Methods
 
@@ -587,7 +589,7 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 | `fetchPolicy`   | `FetchPolicy`                             | See [Caching](#caching).                                          |
 | `invalidates`   | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
 | `optimistic`    | `OptimisticUpdate[]`                      | Cache updates applied immediately and rolled back on failure.     |
-| `headers`       | `HeadersInit`                             | Per-call headers. Calls with these are not deduplicated.          |
+| `headers`       | `HeadersLike`                             | Per-call headers. Calls with these are not deduplicated.          |
 | `signal`        | `AbortSignal`                             | Per-call abort signal. Calls with one are not deduplicated.       |
 | `timeout`       | `number` (ms)                             | Per-call timeout, overrides the client default. Not deduplicated. |
 | `retry`         | `number \| RetryOptions \| false`         | Per-call retry policy. Calls with one are not deduplicated.       |
@@ -602,11 +604,11 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
-| Import                                 | Size    |
-| -------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken) | ~9.7 kB |
-| `lumenql/react`                        | ~1.8 kB |
-| `lumenql/ws`                           | ~1.8 kB |
+| Import                                 | Size     |
+| -------------------------------------- | -------- |
+| `Client` + `MemoryCache` (tree-shaken) | ~10.5 kB |
+| `lumenql/react`                        | ~1.8 kB  |
+| `lumenql/ws`                           | ~1.8 kB  |
 
 ## Development
 

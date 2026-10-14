@@ -166,3 +166,30 @@ describe("multipart/mixed", function () {
 		expect(cancelled).toBe(true);
 	});
 });
+
+describe("applyIncremental with hostile payloads", function () {
+	it("rejects payloads that are not objects, lists that are not lists and non-object entries", function () {
+		for (const payload of [null, 5, "x", { pending: {} }, { incremental: [1] }, { completed: [null] }]) {
+			expect(function apply() {
+				applyIncremental(createIncrementalState(), payload as never);
+			}).toThrow(TypeError);
+		}
+
+		expect(function apply() {
+			applyIncremental(createIncrementalState(), { incremental: [{ path: "a" as never, data: { x: 1 } }] });
+		}).toThrow(TypeError);
+	});
+
+	it("only treats a literal `true` as hasNext", function () {
+		expect(applyIncremental(createIncrementalState(), { data: {}, hasNext: "yes" as never }).hasNext).toBe(false);
+	});
+
+	it("never grows a list past its end from a path index", function () {
+		const state = applyIncremental(createIncrementalState(), { data: { list: [{ id: 1 }] } });
+
+		applyIncremental(state, { incremental: [{ path: ["list", 4294967294], data: { x: 1 } }] });
+		applyIncremental(state, { incremental: [{ path: ["list", 1], data: { id: 2 } }] });
+
+		expect(state.data).toEqual({ list: [{ id: 1 }, { id: 2 }] });
+	});
+});

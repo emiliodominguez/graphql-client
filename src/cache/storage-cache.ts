@@ -68,16 +68,17 @@ export class StorageCache implements Cache {
 	 * @returns The value, or `undefined` on a miss
 	 */
 	get<T>(key: string): T | undefined {
-		const raw = this.#configuration.storage.getItem(this.#configuration.prefix + key);
-
-		if (raw === null) return undefined;
-
 		try {
+			// Storage denying access (blocked cookies, sandboxed iframe) reads as a miss.
+			const raw = this.#configuration.storage.getItem(this.#configuration.prefix + key);
+
+			if (raw === null) return undefined;
+
 			const entry = JSON.parse(raw) as StoredEntry;
 
 			if (entry.e === null || Date.now() < entry.e) return entry.v as T;
 		} catch {
-			// Corrupted entry: fall through and drop it.
+			// Corrupted entry or unavailable storage: fall through and drop it.
 		}
 
 		this.delete(key);
@@ -114,7 +115,11 @@ export class StorageCache implements Cache {
 	 * @param key - The cache key
 	 */
 	delete(key: string): void {
-		this.#configuration.storage.removeItem(this.#configuration.prefix + key);
+		try {
+			this.#configuration.storage.removeItem(this.#configuration.prefix + key);
+		} catch {
+			// Storage denying access holds nothing this cache can serve.
+		}
 	}
 
 	/**
@@ -133,10 +138,14 @@ export class StorageCache implements Cache {
 		const { storage, prefix } = this.#configuration;
 		const keys: string[] = [];
 
-		for (let index = 0; index < storage.length; index++) {
-			const key = storage.key(index);
+		try {
+			for (let index = 0; index < storage.length; index++) {
+				const key = storage.key(index);
 
-			if (key?.startsWith(prefix)) keys.push(key.slice(prefix.length));
+				if (key?.startsWith(prefix)) keys.push(key.slice(prefix.length));
+			}
+		} catch {
+			// Storage denying access lists nothing.
 		}
 
 		return keys;

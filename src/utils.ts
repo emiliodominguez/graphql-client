@@ -29,14 +29,14 @@ export interface AbortScope {
 const IGNORED_TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"?|#[^\n\r]*/g;
 
 /**
- * Matches a block whose nested blocks are already collapsed to `{}`.
+ * Tokens relevant to finding operation definitions: braces, (variable/directive) names and single punctuators.
  */
-const INNERMOST_BLOCK = /\{(?:[^{}]|\{\})*\}/g;
+const TOKEN = /[{}]|[$@]?[_A-Za-z]\w*|[^\s,]/g;
 
 /**
- * Matches an operation definition at the start of the document or right after a previous definition.
+ * Keywords starting an operation definition.
  */
-const OPERATION_DEFINITION = /(?:^|\})\s*(query|mutation|subscription)\b\s*([_A-Za-z][_0-9A-Za-z]*)?/g;
+const OPERATION_KEYWORD = /^(?:query|mutation|subscription)$/;
 
 /**
  * Memoized facts about a document.
@@ -67,27 +67,39 @@ function inspectDocument(document: string): DocumentInfo {
 		let h1 = 0xdeadbeef;
 		let h2 = 0x41c6ce57;
 
-		let source = document.replace(IGNORED_TOKENS, " ");
+		// One linear scan: only keywords at the top level, at the start or right after a previous definition, start an
+		// operation (fields named like keywords, `{ subscription { ... } }`, never do). The next name token names it.
+		let depth = 0;
+		let boundary = true;
+		let unnamed: OperationInfo | undefined;
 
-		// Collapse blocks innermost first, so fields named like keywords (`subscription { ... }`) never read as
-		// operation definitions.
-		for (let previous = ""; previous !== source;) {
-			previous = source;
-			source = source.replace(INNERMOST_BLOCK, "{}");
-		}
+		for (const [token] of document.replace(IGNORED_TOKENS, " ").matchAll(TOKEN)) {
+			if (token === "{" || token === "}") {
+				depth = token === "{" ? depth + 1 : Math.max(depth - 1, 0);
+				boundary = depth === 0 && token === "}";
+				unnamed = undefined;
+			} else if (depth === 0) {
+				if (unnamed && /^\w/.test(token)) unnamed.name = token;
 
-		for (const match of source.trim().matchAll(OPERATION_DEFINITION)) {
-			operations.push({ type: match[1] as OperationType, name: match[2] });
+				unnamed = boundary && OPERATION_KEYWORD.test(token) ? { type: token as OperationType } : undefined;
+
+				if (unnamed) operations.push(unnamed);
+
+				boundary = false;
+			}
 		}
 
 		if (operations.length === 0) operations.push({ type: "query" });
 
 		// Two independent multiply-xor lanes: 64 bits keep collisions negligible for any realistic document count.
+		// The xor-shift folds high bits back down, so characters differing only in high bits still change every bit.
 		for (let index = 0; index < document.length; index++) {
 			const code = document.charCodeAt(index);
 
 			h1 = Math.imul(h1 ^ code, 2654435761);
 			h2 = Math.imul(h2 ^ code, 1597334677);
+			h1 ^= h1 >>> 15;
+			h2 ^= h2 >>> 13;
 		}
 
 		if (documents.size >= 500) documents.clear();
@@ -129,6 +141,16 @@ export function hashDocument(document: string): string {
 }
 
 /**
+ * Checks whether a value is an object (or an array).
+ *
+ * @param value - Any value
+ * @returns `true` for non-null objects
+ */
+export function isObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object";
+}
+
+/**
  * JSON replacer that emits plain-object keys in sorted order.
  *
  * @param _key - Property name (unused)
@@ -136,7 +158,7 @@ export function hashDocument(document: string): string {
  * @returns The value, with plain objects rebuilt using sorted keys
  */
 function sortKeys(_key: string, value: unknown): unknown {
-	if (value === null || typeof value !== "object") return value;
+	if (!isObject(value)) return value;
 
 	const prototype = Object.getPrototypeOf(value);
 
@@ -241,7 +263,7 @@ export function deepFreeze<T>(value: T): T {
 	while (pending.length > 0) {
 		const current = pending.pop();
 
-		if (current === null || typeof current !== "object" || frozen.has(current) || ArrayBuffer.isView(current)) {
+		if (!isObject(current) || frozen.has(current) || ArrayBuffer.isView(current)) {
 			continue;
 		}
 
@@ -276,19 +298,43 @@ export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<
 			reject(signal.reason);
 		}
 
-		if (signal.aborted) abort();
-		else signal.addEventListener("abort", abort, { once: true });
+		const release = onAbort(signal, abort);
 
-		promise.then(resolve, reject).finally(function cleanup(): void {
-			signal.removeEventListener("abort", abort);
-		});
+		promise.then(resolve, reject).finally(release);
 	});
+}
+
+/**
+ * Calls a listener once a signal aborts, right away when it already did.
+ *
+ * @param signal - The abort signal, if any
+ * @param listener - Called on abort
+ * @returns Removes the abort listener
+ */
+export function onAbort(signal: AbortSignal | undefined, listener: () => void): () => void {
+	if (signal?.aborted) listener();
+	else signal?.addEventListener("abort", listener, { once: true });
+
+	return function release(): void {
+		signal?.removeEventListener("abort", listener);
+	};
 }
 
 /**
  * Longest delay `setTimeout` supports (2^31-1 ms, about 24.8 days).
  */
 const MAX_DELAY = 2_147_483_647;
+
+/**
+ * Whether a delay arms a timer. `0`, negative values, `NaN`, `Infinity` and delays a timer cannot hold (they would
+ * overflow and fire at once) mean "never".
+ *
+ * @param ms - The delay in milliseconds
+ * @returns `true` for a positive delay a timer supports
+ */
+export function isTimerDelay(ms: number | undefined): ms is number {
+	return ms !== undefined && ms > 0 && ms <= MAX_DELAY;
+}
 
 /**
  * Merges an external abort signal with an optional timeout into a single, internally controllable signal.
@@ -302,8 +348,7 @@ export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortS
 	const controller = new AbortController();
 	// Only finite, positive timeouts arm a timer: `0`, `Infinity` and `NaN` mean "no timeout".
 	// Timers overflow above 2^31-1 ms (they would fire at once): such timeouts (~25 days) are treated as none too.
-	const timer =
-		timeout !== undefined && timeout > 0 && timeout <= MAX_DELAY ? setTimeout(abortOnTimeout, timeout) : undefined;
+	const timer = isTimerDelay(timeout) ? setTimeout(abortOnTimeout, timeout) : undefined;
 
 	/**
 	 * Aborts with the same `TimeoutError` reason `AbortSignal.timeout` would produce.
@@ -325,11 +370,7 @@ export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortS
 		controller.abort(signal?.reason);
 	}
 
-	if (signal?.aborted) {
-		abortFromSignal();
-	} else {
-		signal?.addEventListener("abort", abortFromSignal, { once: true });
-	}
+	const release = onAbort(signal, abortFromSignal);
 
 	return {
 		signal: controller.signal,
@@ -338,7 +379,7 @@ export function createAbortScope(signal?: AbortSignal, timeout?: number): AbortS
 		},
 		dispose(): void {
 			clearTimeout(timer);
-			signal?.removeEventListener("abort", abortFromSignal);
+			release();
 		},
 	};
 }
@@ -356,12 +397,13 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 		// Timers overflow above 2^31-1 ms and would fire at once.
 		const timer = setTimeout(done, Math.min(ms, MAX_DELAY));
+		const release = onAbort(signal, cancel);
 
 		/**
 		 * Resolves once the delay elapsed.
 		 */
 		function done(): void {
-			signal.removeEventListener("abort", cancel);
+			release();
 			resolve();
 		}
 
@@ -372,9 +414,16 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
 			clearTimeout(timer);
 			reject(signal.reason);
 		}
-
-		signal.addEventListener("abort", cancel, { once: true });
 	});
+}
+
+/**
+ * Swallows an error.
+ *
+ * @returns `undefined`
+ */
+export function ignoreError(): undefined {
+	return undefined;
 }
 
 /**

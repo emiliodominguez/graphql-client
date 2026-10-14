@@ -62,6 +62,11 @@ export interface GraphQLResponse<TData> {
 /**
  * Contract for any cache the client can use. Every method may be sync or async,
  * so in-memory, `localStorage`, IndexedDB or Redis-backed adapters all fit.
+ *
+ * The client serializes its operations per key: an operation on a key waits for the previous one on that key.
+ * So every call must eventually settle (resolve or reject), and an implementation must not wait on the client
+ * for the same key from inside a call (e.g. awaiting `client.gql` for that entry), or that key deadlocks.
+ * A rejected call is handled: a failed `set` or `delete` makes the key read as a miss until a later write succeeds.
  */
 export interface Cache {
 	/**
@@ -356,7 +361,10 @@ export interface QueryState<TData> {
  * @template TData - The shape of the `data` field in the response
  * @template TVariables - The shape of the operation variables
  */
-export interface WatchOptions<TData, TVariables> extends RequestOptions<TData, TVariables> {
+export interface WatchOptions<TData, TVariables> extends Omit<
+	RequestOptions<TData, TVariables>,
+	"invalidates" | "optimistic"
+> {
 	/** Refetch every N milliseconds while observed */
 	pollInterval?: number | undefined;
 	/** Refetch when the page becomes visible again */

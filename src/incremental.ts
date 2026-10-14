@@ -1,5 +1,6 @@
 import { readDelimited } from "./sse";
 import type { GraphQLFormattedError } from "./types";
+import { isObject } from "./utils";
 
 /**
  * A response path: field names and list indices.
@@ -72,38 +73,89 @@ export function createIncrementalState(): IncrementalState {
  * @returns The same state, for chaining
  */
 export function applyIncremental(state: IncrementalState, payload: IncrementalPayload): IncrementalState {
+	// Not narrowed through `isObject`: the payload keeps its declared shape.
+	if (payload === null || typeof payload !== "object") throw malformed();
 	if (payload.data !== undefined && payload.data !== null) state.data = payload.data;
 
-	for (const { id, path } of payload.pending ?? []) state.pending.set(id, path);
+	for (const { id, path } of entries(payload.pending)) state.pending.set(id, list(path));
 
-	for (const item of payload.incremental ?? []) {
+	for (const item of entries(payload.incremental)) {
 		// A payload for an unknown id cannot be placed, so it is ignored rather than clobbering the root.
 		if (item.id !== undefined && !state.pending.has(item.id)) continue;
 
-		const base =
-			item.id === undefined ? (item.path ?? []) : [...(state.pending.get(item.id) ?? []), ...(item.subPath ?? [])];
+		const base = item.id === undefined ? list(item.path) : [...state.pending.get(item.id)!, ...list(item.subPath)];
 
-		if (item.items) {
+		if (item.items !== undefined && item.items !== null) {
 			state.data =
 				item.id === undefined
-					? insertItems(state.data, base, item.items)
-					: appendItems(state.data, base, item.items);
-		} else if (item.data) {
+					? insertItems(state.data, base, list(item.items))
+					: appendItems(state.data, base, list(item.items));
+		} else if (isObject(item.data)) {
 			state.data = updateIn(state.data, base, mergeWith(item.data));
 		}
 
-		state.errors.push(...normalizeErrors(item.errors));
+		addErrors(state, item.errors);
 	}
 
-	for (const { id, errors } of payload.completed ?? []) {
+	for (const { id, errors } of entries(payload.completed)) {
 		state.pending.delete(id);
-		state.errors.push(...normalizeErrors(errors));
+		addErrors(state, errors);
 	}
 
-	state.errors.push(...normalizeErrors(payload.errors));
-	state.hasNext = payload.hasNext ?? false;
+	addErrors(state, payload.errors);
+	state.hasNext = payload.hasNext === true;
 
 	return state;
+}
+
+/**
+ * Appends the normalized errors of a payload part, one by one: spreading a huge list as arguments overflows the stack.
+ *
+ * @param state - The state to update
+ * @param errors - The raw `errors` value
+ */
+function addErrors(state: IncrementalState, errors: unknown): void {
+	for (const error of normalizeErrors(errors)) state.errors.push(error);
+}
+
+/**
+ * Validates an optional list sent by the server.
+ *
+ * @template T - The item type
+ * @param value - The raw value
+ * @returns The list (empty when absent)
+ * @throws {TypeError} When the value is present but not a list
+ */
+function list<T>(value: ReadonlyArray<T> | null | undefined): ReadonlyArray<T> {
+	if (value === undefined || value === null) return [];
+	if (!Array.isArray(value)) throw malformed();
+
+	return value;
+}
+
+/**
+ * Validates an optional list of objects sent by the server.
+ *
+ * @template T - The item type
+ * @param value - The raw value
+ * @returns The list (empty when absent)
+ * @throws {TypeError} When the value is not a list of objects
+ */
+function entries<T extends object>(value: ReadonlyArray<T> | null | undefined): ReadonlyArray<T> {
+	const items = list(value);
+
+	for (const item of items) if (!isObject(item)) throw malformed();
+
+	return items;
+}
+
+/**
+ * Creates the error thrown for a payload that does not follow the incremental delivery format.
+ *
+ * @returns The error
+ */
+function malformed(): TypeError {
+	return new TypeError("Malformed incremental payload.");
 }
 
 /**
@@ -126,7 +178,7 @@ export function normalizeErrors(errors: unknown): GraphQLFormattedError[] {
  * @returns The error, or a placeholder carrying its text
  */
 function toFormattedError(error: unknown): GraphQLFormattedError {
-	if (isContainer(error) && typeof error.message === "string") return error as unknown as GraphQLFormattedError;
+	if (isObject(error) && typeof error.message === "string") return error as unknown as GraphQLFormattedError;
 
 	return { message: typeof error === "string" ? error : "Unknown error" };
 }
@@ -139,7 +191,7 @@ function toFormattedError(error: unknown): GraphQLFormattedError {
  * @param items - Items to append
  * @returns The new root
  */
-function appendItems(root: unknown, path: Path, items: unknown[]): unknown {
+function appendItems(root: unknown, path: Path, items: ReadonlyArray<unknown>): unknown {
 	return updateIn(root, path, function append(list: unknown): unknown {
 		return [...(Array.isArray(list) ? list : []), ...items];
 	});
@@ -153,15 +205,15 @@ function appendItems(root: unknown, path: Path, items: unknown[]): unknown {
  * @param items - Items to write
  * @returns The new root
  */
-function insertItems(root: unknown, path: Path, items: unknown[]): unknown {
+function insertItems(root: unknown, path: Path, items: ReadonlyArray<unknown>): unknown {
 	const start = Number(path.at(-1));
 
 	return updateIn(root, path.slice(0, -1), function insert(list: unknown): unknown {
-		const copy = Array.isArray(list) ? [...list] : [];
+		const current: unknown[] = Array.isArray(list) ? list : [];
+		// `slice` clamps `start` like `splice` would; no argument spreading (a huge batch would overflow the stack).
+		const head = current.slice(0, start);
 
-		copy.splice(start, items.length, ...items);
-
-		return copy;
+		return head.concat(items, current.slice(head.length + items.length));
 	});
 }
 
@@ -185,7 +237,7 @@ function mergeWith(patch: unknown): (target: unknown) => unknown {
  * @returns The merged value
  */
 export function deepMerge(target: unknown, patch: unknown): unknown {
-	if (!isContainer(target) || !isContainer(patch) || Array.isArray(target) !== Array.isArray(patch)) return patch;
+	if (!isObject(target) || !isObject(patch) || Array.isArray(target) !== Array.isArray(patch)) return patch;
 
 	const result: Record<string, unknown> = Array.isArray(target) ? ([...target] as never) : { ...target };
 
@@ -228,26 +280,17 @@ function getOwn(container: Record<string, unknown>, key: string): unknown {
 
 /**
  * Writes an own data property: a `__proto__` key from a hostile server stays data instead of replacing the
- * prototype. Arrays only accept indices.
+ * prototype. Arrays only accept indices up to their length.
  *
  * @param container - An object or array
  * @param key - The property
  * @param value - The value
  */
 function setOwn(container: Record<string, unknown>, key: string, value: unknown): void {
-	if (Array.isArray(container) && !/^\d+$/.test(key)) return;
+	// Arrays only grow by one: an index far past the end would create a huge sparse array (`[...list]` hangs).
+	if (Array.isArray(container) && !(/^\d+$/.test(key) && Number(key) <= container.length)) return;
 
 	Object.defineProperty(container, key, { value, enumerable: true, writable: true, configurable: true });
-}
-
-/**
- * Checks whether a value is an object or an array.
- *
- * @param value - Any value
- * @returns `true` for non-null objects
- */
-function isContainer(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object";
 }
 
 /**

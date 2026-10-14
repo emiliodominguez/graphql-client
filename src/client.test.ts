@@ -290,7 +290,7 @@ describe("Client", function () {
 			});
 			const { client } = setup({}, fetchMock);
 
-			await expect(client.gql({ query: GET_USER })).rejects.toThrow("Invalid JSON in the GraphQL response.");
+			await expect(client.gql({ query: GET_USER })).rejects.toThrow("Invalid GraphQL response.");
 		});
 
 		it("rejects responses without data", async function () {
@@ -361,7 +361,7 @@ describe("Client", function () {
 					ok: true,
 					status: 200,
 					headers: new Headers(),
-					async json() {
+					async text() {
 						controller.abort("stop");
 						throw controller.signal.reason;
 					},

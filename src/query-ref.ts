@@ -1,4 +1,5 @@
 import type { DeepReadonly, FetchMoreOptions, FetchPolicy, QueryState, WatchOptions } from "./types";
+import { isTimerDelay } from "./utils";
 
 /**
  * Listener notified on every state change.
@@ -88,7 +89,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	readonly #listeners = new Set<QueryListener<TData>>();
 
 	/**
-	 * Teardowns for timers and event listeners installed while active.
+	 * Teardowns for the cache registration, timers and event listeners installed while active (empty while inactive).
 	 */
 	readonly #teardowns: Array<() => void> = [];
 
@@ -98,14 +99,10 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	#version = 0;
 
 	/**
-	 * Pending deactivation after the last listener left, cancelled if a listener subscribes meanwhile.
+	 * Pending deactivation after the last listener left, cancelled if a listener subscribes meanwhile. Only ever
+	 * passed to `clearTimeout`, which ignores a timer that already fired or was cleared.
 	 */
 	#deactivation: ReturnType<typeof setTimeout> | undefined;
-
-	/**
-	 * Whether background work (cache registration, timers, event listeners) is installed.
-	 */
-	#active = false;
 
 	/**
 	 * Set when invalidated while active but before a refetch could start.
@@ -202,9 +199,8 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		this.#call(listener, this.#state);
 
 		clearTimeout(this.#deactivation);
-		this.#deactivation = undefined;
 
-		if (!this.#active) this.#activate();
+		if (this.#teardowns.length === 0) this.#activate();
 		// Resubscribed during the deactivation grace period after an invalidation: catch up now.
 		else if (this.#listeners.size === 1 && this.#stale) this.#refresh();
 
@@ -241,7 +237,18 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		const startedAt = this.#host.epoch();
 		const refreshing = this.#refreshing !== 0;
 
-		this.#setState({ data: this.#state.data, error: undefined, loading: true });
+		this.#setState({ error: undefined, loading: true });
+
+		/**
+		 * Applies the caller's merge. Results are frozen: the readonly views handed to it are the same objects.
+		 *
+		 * @param current - The current (real) data
+		 * @param page - The fetched page
+		 * @returns The merged data
+		 */
+		function mergePage(current: TData, page: TData): TData {
+			return options.merge(current as DeepReadonly<TData>, page as DeepReadonly<TData>) as TData;
+		}
 
 		try {
 			const next = await this.#host.fetchMore(options.variables);
@@ -250,23 +257,12 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 			// Started while an invalidation's refetch was running: the page belongs to outdated data, let a refetch win.
 			if (refreshing) {
-				this.#setState({ data: this.#state.data, error: undefined, loading: false });
+				this.#setState({ error: undefined, loading: false });
 				if (this.#listeners.size > 0) this.#refresh();
 				return this.#state;
 			}
 
 			const writes = this.#options.fetchPolicy !== "no-cache" && this.#host.hasCache();
-
-			/**
-			 * Applies the caller's merge. Results are frozen: the readonly views handed to it are the same objects.
-			 *
-			 * @param current - The current (real) data
-			 * @param page - The fetched page
-			 * @returns The merged data
-			 */
-			function mergePage(current: TData, page: TData): TData {
-				return options.merge(current as DeepReadonly<TData>, page as DeepReadonly<TData>) as TData;
-			}
 
 			if (!writes) {
 				// `no-cache` queries never touch the cache: the merged pages stay local to this ref, under any layers.
@@ -284,7 +280,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			if (merged === undefined) {
 				// The entry was invalidated (or expired) meanwhile: its pages are no longer trusted, let a refetch win.
 				this.#stale = true;
-				this.#setState({ data: this.#state.data, error: undefined, loading: false });
+				this.#setState({ error: undefined, loading: false });
 				if (this.#listeners.size > 0) void this.refetch();
 				return this.#state;
 			}
@@ -297,7 +293,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 				loading: false,
 			});
 		} catch (error) {
-			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
+			if (version === this.#version) this.#setState({ error, loading: false });
 		}
 
 		return this.#state;
@@ -319,7 +315,6 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			// handing over to a component) keeps the query running instead of tearing it down and refetching.
 			clearTimeout(ref.#deactivation);
 			ref.#deactivation = setTimeout(function deactivateIdle(): void {
-				ref.#deactivation = undefined;
 				if (ref.#listeners.size === 0) ref.#deactivate();
 			}, 0);
 		};
@@ -330,8 +325,6 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 */
 	#activate(): void {
 		const ref = this;
-
-		this.#active = true;
 		const { pollInterval, refetchOnFocus, refetchOnReconnect, fetchPolicy } = this.#options;
 
 		this.#teardowns.push(
@@ -340,7 +333,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 					ref.#pushes++;
 					ref.#fetched = true;
 					ref.#optimistic = ref.#host.optimistic();
-					ref.#setState({ data, error: undefined, loading: ref.#state.loading });
+					ref.#setState({ data, error: undefined });
 				},
 				current(): TData | undefined {
 					return ref.#state.data;
@@ -348,7 +341,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 				replace(data: TData | undefined): void {
 					ref.#pushes++;
 					ref.#optimistic = ref.#host.optimistic();
-					ref.#setState({ data, error: ref.#state.error, loading: ref.#state.loading });
+					ref.#setState({ data });
 				},
 				invalidate(): void {
 					ref.#stale = true;
@@ -363,10 +356,10 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		// Optimistic data shown before going inactive was never confirmed: once its layers settled, drop it.
 		if (this.#optimistic && !this.#host.optimistic()) {
 			this.#optimistic = false;
-			this.#setState({ data: cached, error: this.#state.error, loading: this.#state.loading });
+			this.#setState({ data: cached });
 		}
 
-		if (cached !== undefined) this.#setState({ data: cached, error: this.#state.error, loading: this.#state.loading });
+		if (cached !== undefined) this.#setState({ data: cached });
 
 		if (this.#host.invalidatedSince(this.#freshAsOf)) this.#stale = true;
 
@@ -376,16 +369,23 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		const fetches = missing || this.#stale || fetchPolicy === "network-only" || fetchPolicy === "cache-and-network";
 
+		// With data shown, `cache-and-network` revalidates as a refetch: its outcome (an error, `loading`) reaches the
+		// state instead of being detached from it.
+		const refreshes =
+			this.#stale ||
+			fetchPolicy === "network-only" ||
+			(fetchPolicy === "cache-and-network" && this.#state.data !== undefined);
+
 		if (fetches) {
-			void this.#fetch(
-				this.#stale || fetchPolicy === "network-only" ? this.#refreshPolicy() : (fetchPolicy ?? "cache-first"),
-			);
-		} else if (this.#state.loading && this.#state.data !== undefined) {
-			// Data arrived (e.g. in the cache) between construction and activation: nothing left to load.
-			this.#setState({ data: this.#state.data, error: this.#state.error, loading: false });
+			void this.#fetch(refreshes ? this.#refreshPolicy() : (fetchPolicy ?? "cache-first"));
+		} else if (this.#state.loading) {
+			// Data arrived (e.g. in the cache) between construction and activation (it is shown: nothing is missing),
+			// nothing left to load.
+			this.#setState({ loading: false });
 		}
 
-		if (pollInterval) {
+		// `Infinity` (or any delay an interval cannot hold, which would fire back to back) disables polling.
+		if (isTimerDelay(pollInterval)) {
 			const timer = setInterval(function poll(): void {
 				if (!ref.#state.loading && ref.#listeners.size > 0) void ref.refetch();
 			}, pollInterval);
@@ -403,8 +403,6 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * Removes every background trigger and cache registration.
 	 */
 	#deactivate(): void {
-		this.#active = false;
-
 		for (const teardown of this.#teardowns.splice(0)) teardown();
 
 		// Invalidations were delivered directly while active; later ones are detected on reactivation.
@@ -460,7 +458,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		this.#stale = false;
 		this.#freshAsOf = this.#host.epoch();
-		this.#setState({ data: this.#state.data, error: this.#state.error, loading: true });
+		this.#setState({ loading: true });
 
 		try {
 			const data = await this.#host.fetch(fetchPolicy);
@@ -470,14 +468,13 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 				this.#optimistic = this.#host.optimistic();
 				// Data pushed by the cache while fetching (this fetch's own result, a newer write, a rollback) is at
 				// least as recent as the fetch's result: it wins.
-				this.#setState({
-					data: this.#pushes !== pushes ? this.#state.data : data,
-					error: undefined,
-					loading: false,
-				});
+				// A `no-cache` fetch is never stored, so nothing pushes its result: it always wins.
+				const pushed = this.#pushes !== pushes && fetchPolicy !== "no-cache";
+
+				this.#setState({ data: pushed ? this.#state.data : data, error: undefined, loading: false });
 			}
 		} catch (error) {
-			if (version === this.#version) this.#setState({ data: this.#state.data, error, loading: false });
+			if (version === this.#version) this.#setState({ error, loading: false });
 		} finally {
 			if (this.#refreshing === version) this.#refreshing = 0;
 		}
@@ -494,12 +491,13 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	}
 
 	/**
-	 * Replaces the state and notifies listeners, unless nothing changed.
+	 * Merges changes into the state (a new object) and notifies listeners, unless nothing changed.
 	 *
-	 * @param next - The next state
+	 * @param changes - The fields to change
 	 */
-	#setState(next: QueryState<TData>): void {
+	#setState(changes: Partial<QueryState<TData>>): void {
 		const state = this.#state;
+		const next = { ...state, ...changes };
 
 		if (state.data === next.data && state.error === next.error && state.loading === next.loading) return;
 

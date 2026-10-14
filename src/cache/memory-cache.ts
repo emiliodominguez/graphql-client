@@ -33,9 +33,14 @@ export class MemoryCache implements Cache {
 	readonly #entries = new Map<string, Entry>();
 
 	/**
-	 * Resolved configuration.
+	 * Time-to-live in milliseconds.
 	 */
-	readonly #configuration: MemoryCacheConfiguration;
+	readonly #ttl: number;
+
+	/**
+	 * Maximum number of entries.
+	 */
+	readonly #maxSize: number;
 
 	/**
 	 * @param configuration - Optional configuration overrides
@@ -53,7 +58,8 @@ export class MemoryCache implements Cache {
 			throw new RangeError(`MemoryCache: invalid maxSize ${maxSize}`);
 		}
 
-		this.#configuration = { ttl, maxSize };
+		this.#ttl = ttl;
+		this.#maxSize = maxSize;
 	}
 
 	/**
@@ -93,9 +99,9 @@ export class MemoryCache implements Cache {
 	 */
 	set<T>(key: string, value: T): void {
 		this.#entries.delete(key);
-		this.#entries.set(key, { value, expiresAt: Date.now() + this.#configuration.ttl });
+		this.#entries.set(key, { value, expiresAt: Date.now() + this.#ttl });
 
-		if (this.#entries.size > this.#configuration.maxSize) {
+		if (this.#entries.size > this.#maxSize) {
 			this.#entries.delete(this.#entries.keys().next().value as string);
 		}
 	}

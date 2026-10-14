@@ -1,5 +1,6 @@
 import { isClientError } from "./errors";
 import type { OperationContext, RetryOptions } from "./types";
+import { isObject } from "./utils";
 
 /**
  * A fully resolved retry policy.
@@ -26,9 +27,19 @@ const networkFailures: WeakSet<object> = ((globalThis as Record<symbol, unknown>
  * @returns Never: always rethrows
  */
 export function rethrowNetworkFailure(error: unknown): never {
-	if (error !== null && typeof error === "object") networkFailures.add(error);
+	if (isObject(error)) networkFailures.add(error);
 
 	throw error;
+}
+
+/**
+ * Whether an error was marked as a network failure (raised by `fetch` or while reading a response body).
+ *
+ * @param error - Any thrown value
+ * @returns `true` for network failures
+ */
+export function isNetworkFailure(error: unknown): boolean {
+	return isObject(error) && networkFailures.has(error);
 }
 
 /**
@@ -71,9 +82,11 @@ export function resolveRetryPolicy(
 export function isRetryable(error: unknown, context: OperationContext): boolean {
 	if (context.type !== "query") return false;
 
-	// `fetch` rejects with a TypeError on network failures in every runtime. Other TypeErrors (an invalid URL,
-	// a body already read by middleware) are deterministic and would fail again.
-	if (error instanceof TypeError) return networkFailures.has(error);
+	// Failures of `fetch` or of a body read are network failures, whatever their class (native fetch rejects with a
+	// TypeError, node-fetch with a FetchError), except aborts. Anything else thrown before (an invalid URL, a body
+	// already read by middleware) is deterministic and would fail again.
+	if (isNetworkFailure(error)) return (error as Error).name !== "AbortError";
+	if (error instanceof TypeError) return false;
 
 	return isClientError(error) && (error.status === 408 || error.status === 429 || error.status >= 500);
 }

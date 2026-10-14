@@ -6,7 +6,7 @@ import type {
 	SubscriptionTransport,
 } from "../types";
 import { AsyncQueue } from "../async-queue";
-import { resolveValue } from "../utils";
+import { isTimerDelay, resolveValue } from "../utils";
 
 /**
  * Subprotocol of the `graphql-ws` library ("GraphQL over WebSocket").
@@ -48,7 +48,7 @@ export interface WebSocketTransportOptions {
 	retryAttempts?: number | undefined;
 	/** Delay before a reconnect attempt (1-based). Defaults to exponential backoff with jitter, capped at 30s. */
 	retryDelay?: ((attempt: number) => number) | undefined;
-	/** Fail the connection when `connection_ack` takes longer than this. Defaults to `10_000`. */
+	/** Fail the connection when `connection_ack` takes longer than this. `0` or `Infinity` disables it. Defaults to `10_000`. */
 	connectionAckTimeout?: number | undefined;
 	/** Send a ping at this interval and reconnect if the previous one got no pong. Disabled by default. */
 	keepAlive?: number | undefined;
@@ -229,9 +229,13 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 				if (socket !== current) return;
 
 				send(current, { type: "connection_init", payload });
-				schedule(function ackTimeout(): void {
-					if (!acknowledged) current.close(TERMINATED, "Connection acknowledgement timeout");
-				}, connectionAckTimeout);
+
+				// Like keep-alive, a non-positive or non-finite timeout disables it (a timer would fire at once).
+				if (isTimerDelay(connectionAckTimeout)) {
+					schedule(function ackTimeout(): void {
+						if (!acknowledged) terminate(current, "Connection acknowledgement timeout");
+					}, connectionAckTimeout);
+				}
 			} catch (error) {
 				if (socket === current) failAll(error);
 
@@ -292,7 +296,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 
 				for (const [id, active] of sinks) send(target, { id, type: "subscribe", payload: active.request });
 
-				if (keepAlive > 0) ping(target, false);
+				if (isTimerDelay(keepAlive)) ping(target, false);
 
 				scheduleLazyClose();
 				break;
@@ -328,7 +332,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 */
 	function ping(target: WebSocketLike, check: boolean): void {
 		if (check && awaitingPong) {
-			target.close(TERMINATED, "Keep-alive timeout");
+			terminate(target, "Keep-alive timeout");
 			return;
 		}
 
@@ -337,6 +341,18 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 		schedule(function nextPing(): void {
 			ping(target, true);
 		}, keepAlive);
+	}
+
+	/**
+	 * Gives up on an unresponsive socket: closes it and handles it as closed right away. A dead peer completes the
+	 * closing handshake (and fires `close`) only once the OS drops the connection, possibly minutes later.
+	 *
+	 * @param target - The socket
+	 * @param reason - The close reason
+	 */
+	function terminate(target: WebSocketLike, reason: string): void {
+		target.close(TERMINATED, reason);
+		closed(target, { code: TERMINATED, reason });
 	}
 
 	/**
@@ -384,7 +400,8 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 * Closes the socket once no subscription is left, after `lazyCloseTimeout`.
 	 */
 	function scheduleLazyClose(): void {
-		if (sinks.size > 0 || !socket || lazyCloseTimeout === Infinity) return;
+		// Beyond what a timer holds (`Infinity`), the socket stays open.
+		if (sinks.size > 0 || !socket || lazyCloseTimeout > 2_147_483_647) return;
 
 		clearTimeout(closeTimer);
 		closeTimer = setTimeout(function closeIdle(): void {

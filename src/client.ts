@@ -1,4 +1,4 @@
-import { ClientError, isClientError } from "./errors";
+import { ClientError, isClientError, type ClientErrorDetails } from "./errors";
 import {
 	applyIncremental,
 	createIncrementalState,
@@ -11,7 +11,7 @@ import {
 	type IncrementalState,
 } from "./incremental";
 import { QueryRef, type QueryWatcher } from "./query-ref";
-import { resolveRetryPolicy, rethrowNetworkFailure } from "./retry";
+import { isNetworkFailure, resolveRetryPolicy, rethrowNetworkFailure } from "./retry";
 import { readServerSentEvents } from "./sse";
 import type {
 	Cache as CacheAdapter,
@@ -37,6 +37,7 @@ import {
 	createAbortScope,
 	deepFreeze,
 	createCacheKey,
+	ignoreError,
 	matchesKeyPrefix,
 	parseOperation,
 	resolveValue,
@@ -92,7 +93,7 @@ interface SharedState {
 	 */
 	lanes: Map<string, Lane>;
 	/** Invalidations whose keys are still being listed or deleted */
-	invalidating: Set<CacheKey>;
+	invalidating: Set<Invalidation>;
 	/** While invalidations are in progress: sequence at which each key was last stored (newer data is kept) */
 	stored: Map<string, number>;
 	/**
@@ -100,6 +101,18 @@ interface SharedState {
 	 * what the cache holds for them is not trusted, they read as misses until a write or delete succeeds.
 	 */
 	untrusted: Set<string>;
+}
+
+/**
+ * An invalidation in progress.
+ */
+interface Invalidation {
+	/** The invalidated prefix */
+	prefix: CacheKey;
+	/** Its sequence */
+	epoch: number;
+	/** Keys listed but not deleted yet (`undefined` until the keys were listed) */
+	pending?: Set<string> | undefined;
 }
 
 /**
@@ -112,6 +125,8 @@ interface Lane {
 	size: number;
 	/** Order of the newest data written by the lane */
 	order: number;
+	/** The newest store queued and not written yet: reads outside the lane see it (read-your-writes) */
+	latest?: { data: unknown; epoch: number } | undefined;
 }
 
 /**
@@ -139,7 +154,17 @@ interface OptimisticLayer {
 	update(current: unknown): unknown;
 	/** Sequence when its operation started: real data requested later may already contain the operation's effect */
 	since: number;
+	/**
+	 * Set once the operation succeeded. The layer stays applied on top of real data requested before the operation
+	 * started (which cannot contain its effect) and is dropped as soon as newer real data arrives.
+	 */
+	committed?: boolean | undefined;
 }
+
+/**
+ * Maximum number of keys remembered as untrusted (failed cleanup) per cache.
+ */
+const UNTRUSTED_LIMIT = 1_000;
 
 /**
  * Maximum number of invalidations remembered per cache.
@@ -158,15 +183,25 @@ const registry = ((globalThis as Record<symbol, unknown>)[Symbol.for("lumenql.sh
 }) as { states: WeakMap<object, SharedState>; sequence: number };
 
 /**
- * Shared state per cache (or per client when it has no cache).
- */
-const sharedStates = registry.states;
-
-/**
  * Init of every Request the client built, so `fetch` can be called as `fetch(url, init)`: fetch implementations
  * other than the global one (node-fetch, cross-fetch, an npm `undici`) do not recognize the global Request class.
  */
 const requestInits = new WeakMap<Request, RequestInit>();
+
+/**
+ * Request fields a request built by middleware forwards to `fetch(url, init)` when they differ from these defaults.
+ * Defaults are never forwarded: some runtimes reject the fields themselves (e.g. Cloudflare Workers).
+ */
+const REQUEST_DEFAULTS = {
+	cache: "default",
+	credentials: "same-origin",
+	integrity: "",
+	keepalive: false,
+	mode: "cors",
+	redirect: "follow",
+	referrer: "about:client",
+	referrerPolicy: "",
+} as const;
 
 /**
  * Returns the shared state of a cache, creating it on first use.
@@ -175,7 +210,7 @@ const requestInits = new WeakMap<Request, RequestInit>();
  * @returns The shared state
  */
 function getSharedState(owner: object): SharedState {
-	let state = sharedStates.get(owner);
+	let state = registry.states.get(owner);
 
 	if (!state) {
 		state = {
@@ -190,7 +225,7 @@ function getSharedState(owner: object): SharedState {
 			stored: new Map(),
 			untrusted: new Set(),
 		};
-		sharedStates.set(owner, state);
+		registry.states.set(owner, state);
 	}
 
 	return state;
@@ -260,11 +295,9 @@ export class Client {
 		// Files have no stable identity in a cache key: never cache nor dedupe requests that carry them.
 		const hasFiles = containsFiles(options.variables);
 		const fetchPolicy = hasFiles ? "no-cache" : (options.fetchPolicy ?? (isQuery ? "cache-first" : "no-cache"));
-		const readsCache =
-			fetchPolicy === "cache-first" || fetchPolicy === "cache-only" || fetchPolicy === "cache-and-network";
 
-		if (cache && readsCache) {
-			const cached = await this.#read<TData>(cacheKey);
+		if (cache && readsCache(fetchPolicy)) {
+			const cached = this.#queued<TData>(cacheKey) ?? (await this.#read<TData>(cacheKey));
 
 			if (cached !== undefined) {
 				this.#log(operation, "cache hit");
@@ -312,41 +345,33 @@ export class Client {
 			}
 		}
 
+		let data: TData | undefined;
+		let failure: { error: unknown } | undefined;
+
 		try {
 			// On a miss, `cache-and-network` is a plain network request.
 			const networkPolicy = fetchPolicy === "cache-and-network" ? "network-only" : fetchPolicy;
-			const data = await this.#request<TData, TVariables>(
-				query,
-				options,
-				operation,
-				cacheKey,
-				networkPolicy,
-				hasFiles,
-			);
 
-			// The mutation succeeded: a failing cache write while settling is reported, never turned into a rejection
-			// (callers could retry a non-idempotent mutation).
-			try {
-				await settle?.(true);
-			} catch (settleError) {
-				this.#report(settleError, context, options.signal);
-			}
-
-			// Only now: a refetch triggered by the invalidation must find the optimistic layers settled, or it would
-			// bring data already containing the mutation under a layer applying it again.
-			await this.#applyInvalidates(options, context);
-
-			return data;
+			data = await this.#request<TData, TVariables>(query, options, operation, cacheKey, networkPolicy, hasFiles);
 		} catch (error) {
-			// A failing rollback is reported, but never masks the operation's error.
-			try {
-				await settle?.(false);
-			} catch (settleError) {
-				this.#report(settleError, context, options.signal);
-			}
-
-			throw error;
+			failure = { error };
 		}
+
+		// Settling is reported when it fails, never turned into a rejection: a failing rollback must not mask the
+		// operation's error, and callers could retry a succeeded (non-idempotent) mutation on a failing cache write.
+		try {
+			await settle?.(!failure);
+		} catch (settleError) {
+			this.#report(settleError, context, options.signal);
+		}
+
+		if (failure) throw failure.error;
+
+		// Only now: a refetch triggered by the invalidation must find the optimistic layers settled, or it would
+		// bring data already containing the mutation under a layer applying it again.
+		await this.#applyInvalidates(options, context);
+
+		return data as TData;
 	}
 
 	/**
@@ -446,15 +471,16 @@ export class Client {
 		let incomplete = false;
 
 		try {
-			const { subscriptionTransport } = this.#configuration;
-			const { persistedQueries } = this.#configuration;
+			const { subscriptionTransport, persistedQueries } = this.#configuration;
 			const strict = typeof persistedQueries === "object" && persistedQueries.strict === true;
 			// Trusted documents never send the document text, whatever the transport.
 			const request: SubscriptionRequest = strict
 				? {
 						variables: options.variables,
 						operationName: options.operationName,
-						extensions: { persistedQuery: { version: 1, sha256Hash: await this.#hash(query) } },
+						extensions: {
+							persistedQuery: { version: 1, sha256Hash: await raceAbort(this.#hash(query), scope.signal) },
+						},
 					}
 				: { query, variables: options.variables, operationName: options.operationName };
 			let response: Response | undefined;
@@ -463,7 +489,8 @@ export class Client {
 			if (subscriptionTransport && operation.type === "subscription") {
 				source = subscriptionTransport.subscribe(request, scope.signal);
 			} else {
-				const headers = await this.#createHeaders(query, options.headers);
+				// A stalled header resolver (token refresh) never outlives the abort.
+				const headers = await raceAbort(this.#createHeaders(query, options.headers), scope.signal);
 
 				headers.set(
 					"Accept",
@@ -509,7 +536,14 @@ export class Client {
 				// Payloads already buffered when the consumer aborted are dropped.
 				if (scope.signal.aborted) break;
 
-				const { data, errors } = applyIncremental(state, payload);
+				try {
+					applyIncremental(state, payload);
+				} catch (cause) {
+					// A malformed payload from the server.
+					throw responseError("Invalid GraphQL response.", response, { cause });
+				}
+
+				const { data, errors } = state;
 
 				incomplete = state.hasNext;
 
@@ -561,16 +595,18 @@ export class Client {
 		const client = this;
 		const query = String(options.query);
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
-		const readsCache =
-			options.fetchPolicy === undefined ||
-			options.fetchPolicy === "cache-first" ||
-			options.fetchPolicy === "cache-only" ||
-			options.fetchPolicy === "cache-and-network";
+		const peeksCache = readsCache(options.fetchPolicy ?? "cache-first");
 
 		return new QueryRef<TData, TVariables>(
 			{
 				async fetch(fetchPolicy: FetchPolicy): Promise<TData> {
-					const data = await client.gql<TData, TVariables>({ ...options, fetchPolicy });
+					// Mutation side effects never re-run on every refetch (untyped callers may still pass them).
+					const data = await client.gql<TData, TVariables>({
+						...options,
+						fetchPolicy,
+						invalidates: undefined,
+						optimistic: undefined,
+					});
 					const cache = client.#configuration.cache;
 
 					// A superseded response is not stored: show what the entry holds now (optimistic layers included),
@@ -587,7 +623,6 @@ export class Client {
 					return client.#overlay(cacheKey, data);
 				},
 				merge(next: TData, merge: (current: TData, next: TData) => TData, since: number, expected: boolean) {
-					const cache = client.#configuration.cache;
 					// Ordered when queued: a write queued after the merge is newer, whenever the merge runs.
 					const order = ++registry.sequence;
 
@@ -612,13 +647,19 @@ export class Client {
 						// In-flight responses for the entry are now older than the merged pages.
 						client.#supersede(cacheKey, order);
 
-						return (await client.#write(cacheKey, merged, since, order)) ? merged : undefined;
+						// The merged pages are as fresh as their oldest part: the page was requested when fetchMore started.
+						const freshness = Math.max(entry?.order ?? 0, since);
+
+						return (await client.#write(cacheKey, merged, since, order, freshness)) ? merged : undefined;
 					});
 				},
 				peek(): TData | undefined {
-					if (!readsCache) return undefined;
+					if (!peeksCache) return undefined;
 
 					try {
+						const queued = client.#queued<TData>(cacheKey);
+
+						if (queued !== undefined) return queued;
 						if (client.#shared.untrusted.has(cacheKey)) return undefined;
 
 						return deepFreeze(syncValue(client.#configuration.cache?.get<TData>(cacheKey)));
@@ -631,10 +672,10 @@ export class Client {
 					return client.#configuration.cache !== undefined;
 				},
 				optimistic(): boolean {
-					return (client.#shared.layers.get(cacheKey)?.layers.length ?? 0) > 0;
+					return client.#shared.layers.get(cacheKey)?.layers.some(isPending) ?? false;
 				},
 				epoch(): number {
-					return client.#epoch();
+					return registry.sequence;
 				},
 				invalidatedSince(epoch: number): boolean {
 					return client.#invalidatedSince(cacheKey, epoch);
@@ -648,18 +689,22 @@ export class Client {
 						variables: { ...options.variables, ...variables } as TVariables,
 						fetchPolicy: "no-cache",
 						invalidates: undefined,
+						optimistic: undefined,
 					});
 				},
 				real(visible: TData | undefined): TData | undefined {
-					return client.#real(cacheKey, visible);
+					const entry = client.#shared.layers.get(cacheKey);
+
+					return entry ? (entry.base as TData | undefined) : visible;
 				},
 				overlay(data: TData): TData {
 					return client.#overlay(cacheKey, data);
 				},
 				report(error: unknown): void {
-					const context = { ...parseOperation(query, options.operationName), query, variables: options.variables };
+					const operation = parseOperation(query, options.operationName);
+					const context = { ...operation, query, variables: options.variables, attempt: 0 };
 
-					if (client.#configuration.onError) client.#report(error, { ...context, attempt: 0 }, undefined);
+					if (client.#configuration.onError) client.#report(error, context, undefined);
 					else console.error(error);
 				},
 			},
@@ -678,12 +723,17 @@ export class Client {
 	async read<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		target: WithVariables<CacheTarget<TData, TVariables>, TVariables>,
 	): Promise<TData | undefined> {
-		return this.#read<TData>(this.#getCacheKey(target));
+		const cacheKey = this.#getCacheKey(target);
+
+		return this.#queued<TData>(cacheKey) ?? this.#read<TData>(cacheKey);
 	}
 
 	/**
 	 * Writes a result into the cache and pushes it to every watcher of that entry.
 	 * The building block for optimistic updates: write the expected data, then `invalidate` or roll back.
+	 * Resolves once the cache operations queued earlier for the same entry and this write have settled; reads
+	 * made before that already see the written data. A write during a pending `optimistic` mutation on the entry
+	 * is newer data: the mutation's layer stays on top of it until the mutation settles, then the write wins.
 	 *
 	 * @template TData - The shape of the `data` field
 	 * @template TVariables - The shape of the operation variables
@@ -694,13 +744,7 @@ export class Client {
 		target: WithVariables<CacheTarget<TData, TVariables>, TVariables>,
 		data: NoInference<TData>,
 	): Promise<void> {
-		const cacheKey = this.#getCacheKey(target);
-
-		const order = ++registry.sequence;
-
-		// In-flight responses for this entry are now older than the written data.
-		this.#supersede(cacheKey, order);
-		await this.#store(cacheKey, data, order);
+		await this.#overwrite(this.#getCacheKey(target), data);
 	}
 
 	/**
@@ -720,7 +764,7 @@ export class Client {
 
 			// Never ship optimistic (unconfirmed) data in a snapshot: take the real data under pending layers.
 			const entry = this.#shared.layers.get(key);
-			const data = entry ? (entry.stale ? undefined : entry.base) : await this.#read(key);
+			const data = entry ? committedData(entry) : await this.#read(key);
 
 			if (data !== undefined) snapshot[key] = data;
 		}
@@ -734,13 +778,7 @@ export class Client {
 	 * @param snapshot - The snapshot
 	 */
 	async restore(snapshot: Record<string, unknown>): Promise<void> {
-		for (const [key, data] of Object.entries(snapshot)) {
-			const order = ++registry.sequence;
-
-			// Like `write`: in-flight responses for the entry are now older than the restored data.
-			this.#supersede(key, order);
-			await this.#store(key, data, order);
-		}
+		for (const [key, data] of Object.entries(snapshot)) await this.#overwrite(key, data);
 	}
 
 	/**
@@ -762,13 +800,17 @@ export class Client {
 			if (matchesKeyPrefix(key, prefix)) this.#supersede(key, epoch);
 		}
 
-		for (const key of [...inFlight.keys()]) {
+		for (const key of inFlight.keys()) {
 			if (matchesKeyPrefix(key.replace(/^no-cache:/, ""), prefix)) inFlight.delete(key);
 		}
 
 		for (const [key, entry] of shared.layers) {
+			if (!matchesKeyPrefix(key, prefix)) continue;
+
 			// The last real data is kept for live queries to fall back on; it is never written back to the cache.
-			if (matchesKeyPrefix(key, prefix)) entry.stale = true;
+			// Committed layers go: the refetch brings data containing their effect.
+			entry.stale = true;
+			entry.layers = entry.layers.filter(isPending);
 		}
 
 		shared.invalidations.push({ prefix, epoch });
@@ -777,10 +819,21 @@ export class Client {
 
 		// Read after recording the invalidation: a response landing meanwhile is already superseded.
 		const client = this;
+		const invalidation: Invalidation = { prefix, epoch };
 		let removed = 0;
 		let failure: { error: unknown } | undefined;
 
-		shared.invalidating.add(prefix);
+		shared.invalidating.add(invalidation);
+
+		/**
+		 * `filter` callback matching serialized cache keys under the prefix.
+		 *
+		 * @param key - A serialized cache key
+		 * @returns Whether the key belongs to the prefix
+		 */
+		function belongsToPrefix(key: string): boolean {
+			return matchesKeyPrefix(key, prefix);
+		}
 
 		/**
 		 * Deletes one key in its lane, unless data was stored for it after the invalidation was issued.
@@ -790,15 +843,21 @@ export class Client {
 		 */
 		function remove(key: string): Promise<void> {
 			return client.#lane(key, async function deleteKey(): Promise<void> {
-				if ((shared.stored.get(key) ?? -1) >= epoch) return;
+				try {
+					if ((shared.stored.get(key) ?? -1) >= epoch) return;
 
-				await client.#drop(key);
-				removed++;
+					await client.#drop(key);
+					removed++;
+				} finally {
+					invalidation.pending?.delete(key);
+				}
 			});
 		}
 
 		try {
-			const keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
+			const keys = cache ? [...(await cache.keys())].filter(belongsToPrefix) : [];
+
+			invalidation.pending = new Set(keys);
 
 			for (const result of await Promise.allSettled(keys.map(remove))) {
 				if (result.status === "rejected") failure ??= { error: result.reason };
@@ -806,7 +865,7 @@ export class Client {
 		} catch (error) {
 			failure = { error };
 		} finally {
-			shared.invalidating.delete(prefix);
+			shared.invalidating.delete(invalidation);
 
 			if (shared.invalidating.size === 0) shared.stored.clear();
 		}
@@ -1095,17 +1154,7 @@ export class Client {
 					);
 				}
 
-				// A request built by middleware is passed as is. `fetch` consumes the body: a clone lets middleware
-				// call `next()` again. Cloning a consumed request throws: that deterministic error is never mistaken
-				// for a network failure.
-				try {
-					// Some polyfilled Request classes cannot clone: send the request itself then.
-					if (typeof current.clone === "function") current = current.clone();
-				} catch (error) {
-					return Promise.reject(error);
-				}
-
-				return fetchFn(current).catch(rethrowNetworkFailure);
+				return send(current);
 			}
 
 			return handler(
@@ -1115,6 +1164,45 @@ export class Client {
 				},
 				context,
 			);
+		}
+
+		/**
+		 * Sends a request built by middleware as `fetch(url, init)` too. Its body is read from a clone, so middleware
+		 * may call `next()` again; reading a consumed request fails deterministically, never as a network failure.
+		 *
+		 * @param current - The request
+		 * @returns The response
+		 */
+		async function send(current: Request): Promise<Response> {
+			// A polyfilled Request without `body` (whatwg-fetch on React Native) cannot read every body as bytes
+			// (FormData): it goes to fetch as is, which handles its own Request class. A clone keeps it reusable.
+			if (!("body" in current)) {
+				const polyfilled: Request = current;
+
+				return fetchFn(typeof polyfilled.clone === "function" ? polyfilled.clone() : polyfilled).catch(
+					rethrowNetworkFailure,
+				);
+			}
+
+			const body =
+				current.body === null || current.method === "GET" || current.method === "HEAD"
+					? null
+					: await current.clone().arrayBuffer();
+			const init: Record<string, unknown> = {
+				method: current.method,
+				headers: current.headers,
+				body,
+				signal: current.signal,
+			};
+
+			for (const [name, fallback] of Object.entries(REQUEST_DEFAULTS)) {
+				const value = current[name as keyof typeof REQUEST_DEFAULTS];
+
+				// `navigate` is not a valid init mode.
+				if (value !== undefined && value !== fallback && value !== "navigate") init[name] = value;
+			}
+
+			return fetchFn(current.url, init as RequestInit).catch(rethrowNetworkFailure);
 		}
 
 		return call(0, request);
@@ -1189,25 +1277,24 @@ export class Client {
 	 * @throws {ClientError} When the response cannot be used
 	 */
 	async #parseResponse<TData>(response: Response, signal?: AbortSignal): Promise<TData> {
-		const { status } = response;
 		const contentType = response.headers.get("Content-Type") ?? "";
+		const multipart = response.ok && response.body && contentType.toLowerCase().includes("multipart/mixed");
 		let body: (GraphQLResponse<TData> & { incomplete?: boolean }) | undefined;
 
+		// A body already read (by middleware) fails the same way on every attempt: never a network failure.
+		if (response.bodyUsed) throw responseError("Response body already read.", response);
+
 		try {
-			body =
-				response.ok && response.body && contentType.toLowerCase().includes("multipart/mixed")
-					? await collectIncremental<TData>(response.body, getBoundary(contentType), signal)
-					: ((await response.json()) as GraphQLResponse<TData>);
+			// Read, then parse: `json()` mixes both failures, and its parse error is not a SyntaxError everywhere.
+			body = multipart
+				? await collectIncremental<TData>(response.body!, getBoundary(contentType), signal)
+				: (JSON.parse(await response.text().catch(rethrowNetworkFailure)) as GraphQLResponse<TData>);
 		} catch (cause) {
-			// Abort/timeout during body streaming must surface as-is, not as a parse error.
-			if (signal?.aborted) throw cause;
+			// Abort/timeout during body streaming must surface as-is, not as a parse error. A body failing mid-read
+			// (connection reset) is a network failure, retryable like one. Malformed JSON or payloads are deterministic.
+			if (signal?.aborted || isNetworkFailure(cause)) throw cause;
 
-			// A body failing mid-read (connection reset) is a network failure, retryable like one.
-			if (!(cause instanceof SyntaxError)) rethrowNetworkFailure(cause);
-
-			const message = response.ok ? "Invalid JSON in the GraphQL response." : describeStatus(response);
-
-			throw new ClientError(message, { status, response, cause });
+			throw responseError(response.ok ? "Invalid GraphQL response." : describeStatus(response), response, { cause });
 		}
 
 		const errors = normalizeErrors(body?.errors);
@@ -1215,13 +1302,8 @@ export class Client {
 
 		if (errors.length) throw createGraphQLError(response, errors, data);
 
-		if (!response.ok) {
-			throw new ClientError(describeStatus(response), { status, response, data });
-		}
-
-		if (data === undefined) {
-			throw new ClientError("No data found in the GraphQL response.", { status, response });
-		}
+		if (!response.ok) throw responseError(describeStatus(response), response, { data });
+		if (data === undefined) throw responseError("No data found in the GraphQL response.", response);
 
 		if (body?.incomplete) throw incompleteError(response, data);
 
@@ -1262,14 +1344,11 @@ export class Client {
 
 				if (!entry || index === -1) continue;
 
-				entry.layers.splice(index, 1);
-
-				// The operation succeeded: fold its layer into the real data, unless that data may already contain the
-				// effect (requested after the operation was sent: folding would apply it twice) or is unknown (never
-				// cached, or invalidated: a placeholder must never become real data, the refetch brings the truth).
-				if (commit && !entry.stale && entry.base !== undefined && entry.order < layer.since) {
-					entry.base = deepFreeze(applyLayer(entry.base, layer));
-				}
+				// The operation succeeded: its layer stays (committed) on top of real data requested before it started,
+				// until newer real data (which contains its effect) arrives. An invalidated entry drops it: the refetch
+				// brings the truth.
+				if (commit && !entry.stale) layer.committed = true;
+				else entry.layers.splice(index, 1);
 
 				// The entry stays registered until its rollback ran in the lane: stores queued meanwhile must keep
 				// updating its base, or the rollback would render data older than theirs.
@@ -1279,7 +1358,7 @@ export class Client {
 			for (const [cacheKey, entry] of touched) {
 				try {
 					await client.#lane(cacheKey, function rollBack(): Promise<void> {
-						return client.#settleEntry(cacheKey, entry);
+						return client.#settleEntry(cacheKey, entry, commit);
 					});
 				} catch (error) {
 					failure ??= { error };
@@ -1356,9 +1435,36 @@ export class Client {
 
 		deepFreeze(data);
 
-		return this.#lane(cacheKey, function store(): Promise<boolean> {
-			return client.#write(cacheKey, data, epoch, order);
-		}).then(ignoreError);
+		const pending = { data, epoch };
+		const result = this.#lane(cacheKey, async function store(): Promise<boolean> {
+			try {
+				return await client.#write(cacheKey, data, epoch, order);
+			} finally {
+				if (lane.latest === pending) lane.latest = undefined;
+			}
+		});
+		const lane = this.#shared.lanes.get(cacheKey)!;
+
+		// Visible to reads outside the lane right away (read-your-writes), e.g. a live query created right after.
+		lane.latest = pending;
+
+		return result.then(ignoreError);
+	}
+
+	/**
+	 * Stores data written explicitly (`write`, `restore`).
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param data - The real data
+	 * @returns Settles once the store ran in the entry's lane
+	 */
+	#overwrite(cacheKey: string, data: unknown): Promise<void> {
+		const order = ++registry.sequence;
+
+		// In-flight responses for this entry are now older than the written data.
+		this.#supersede(cacheKey, order);
+
+		return this.#store(cacheKey, data, order);
 	}
 
 	/**
@@ -1368,9 +1474,17 @@ export class Client {
 	 * @param data - The (frozen) real data
 	 * @param epoch - The sequence when the data was issued: an invalidation after it drops the data
 	 * @param order - The order of the response or write
+	 * @param freshness - When the data was requested (defaults to `order`): data requested after an operation
+	 *   started already contains its committed optimistic effect
 	 * @returns Whether the data was stored
 	 */
-	async #write(cacheKey: string, data: unknown, epoch: number, order: number): Promise<boolean> {
+	async #write(
+		cacheKey: string,
+		data: unknown,
+		epoch: number,
+		order: number,
+		freshness: number = order,
+	): Promise<boolean> {
 		const cache = this.#configuration.cache;
 		const entry = this.#shared.layers.get(cacheKey);
 		const lane = this.#shared.lanes.get(cacheKey)!;
@@ -1387,9 +1501,23 @@ export class Client {
 		if (entry) {
 			entry.base = data;
 			entry.stale = false;
-			entry.order = order;
+			entry.order = freshness;
+			// Committed layers whose effect this data already contains are done.
+			entry.layers = entry.layers.filter(function stillApplies(layer: OptimisticLayer): boolean {
+				return !layer.committed || freshness <= layer.since;
+			});
+
+			// Only real data is left: the cache takes over once it is rendered (a settlement emptying the entry while
+			// it renders queued its own rollback, which then shows the final state).
+			const realOnly = entry.layers.length === 0;
+
 			await this.#render(cacheKey, entry);
 			this.#landed(cacheKey, epoch);
+
+			if (realOnly && entry.layers.length === 0 && this.#shared.layers.get(cacheKey) === entry) {
+				this.#shared.layers.delete(cacheKey);
+			}
+
 			return true;
 		}
 
@@ -1477,6 +1605,22 @@ export class Client {
 	}
 
 	/**
+	 * The newest store queued for a key and not written yet (with pending optimistic layers on top), so reads outside
+	 * the key's lane see their own writes. Never used inside the lane, where it could be a future value.
+	 *
+	 * @template T - The value type
+	 * @param cacheKey - The serialized cache key
+	 * @returns The visible queued data, if any
+	 */
+	#queued<T>(cacheKey: string): T | undefined {
+		const latest = this.#shared.lanes.get(cacheKey)?.latest;
+
+		if (!latest || this.#invalidatedSince(cacheKey, latest.epoch)) return undefined;
+
+		return this.#overlay(cacheKey, latest.data as T);
+	}
+
+	/**
 	 * Deletes a cache entry. A failed delete leaves the key untrusted (read as a miss) until a write or delete of it
 	 * succeeds.
 	 *
@@ -1490,29 +1634,66 @@ export class Client {
 			untrusted.delete(cacheKey);
 		} catch (error) {
 			untrusted.add(cacheKey);
+
+			// Bounded: the oldest untrusted keys are forgotten (they may serve outdated data again, never unbounded memory).
+			if (untrusted.size > UNTRUSTED_LIMIT) untrusted.delete(untrusted.values().next().value!);
+
 			throw error;
 		}
 	}
 
 	/**
-	 * Shows an entry's state once optimistic layers were removed from it (in its lane).
+	 * Shows an entry's state once optimistic layers were removed from it (in its lane): renders it, or retracts it.
 	 *
 	 * @param cacheKey - The serialized cache key
 	 * @param entry - The optimistic entry
+	 * @param commit - Whether the settled operation succeeded
 	 */
-	async #settleEntry(cacheKey: string, entry: OptimisticEntry): Promise<void> {
-		const { layers } = this.#shared;
+	async #settleEntry(cacheKey: string, entry: OptimisticEntry, commit: boolean): Promise<void> {
+		const { layers, active } = this.#shared;
 
 		// Another settlement already showed this entry's final state and handed it back to the cache: rendering the
 		// detached entry again would overwrite whatever was stored since.
 		if (layers.get(cacheKey) !== entry) return;
+
+		// Only committed layers left, and no request in flight could still bring real data older than them: they
+		// become part of the real data (a placeholder over unknown data never does: the entry is dropped, refetched).
+		if (entry.layers.length > 0 && !entry.layers.some(isPending) && !active.has(cacheKey)) {
+			if (entry.base !== undefined) entry.base = deepFreeze(entry.layers.reduce(applyLayer, entry.base));
+
+			entry.layers = [];
+		}
 
 		// Whether this rollback shows the entry's final state (another settlement may empty it while this one renders:
 		// that one then shows the final state).
 		const final = entry.layers.length === 0;
 
 		try {
-			await this.#showSettled(cacheKey, entry);
+			// An invalidated entry is never rendered into the cache: show live queries the real data they fell back on
+			// (without the removed layers), then let them refetch, joining a refetch already in flight. A success over
+			// unknown data keeps what they show (its effect is real) until the refetch lands, instead of blanking them.
+			if (entry.stale) {
+				const fallback = entry.layers.reduce(applyLayer, entry.base);
+
+				if (fallback === undefined && commit) this.#retract(cacheKey, undefined, true, false);
+				else this.#retract(cacheKey, fallback, true);
+
+				// The cache may still hold a render with the removed layers (the invalidation failed to list or delete
+				// the key): it never outlives the entry. Nothing newer was stored, or the entry would not be stale.
+				await this.#drop(cacheKey);
+				return;
+			}
+
+			// Remaining layers are rendered. Once the last layer is gone, the real data is restored; if the entry expired
+			// meanwhile, only live queries get it back (they would otherwise keep showing the removed layer): nothing is
+			// written to the cache.
+			const expired =
+				entry.layers.length === 0 &&
+				this.#configuration.cache !== undefined &&
+				(await this.#read(cacheKey)) === undefined;
+
+			if (expired) this.#retract(cacheKey, entry.base, entry.base === undefined);
+			else await this.#render(cacheKey, entry);
 		} finally {
 			// Unless a new layer was applied meanwhile, the entry holds real data only: the cache takes over.
 			if (final && entry.layers.length === 0 && layers.get(cacheKey) === entry) layers.delete(cacheKey);
@@ -1520,41 +1701,24 @@ export class Client {
 	}
 
 	/**
-	 * Renders (or retracts) an entry whose layers were just removed.
-	 *
-	 * @param cacheKey - The serialized cache key
-	 * @param entry - The optimistic entry
-	 */
-	async #showSettled(cacheKey: string, entry: OptimisticEntry): Promise<void> {
-		// An invalidated entry is never rendered into the cache: show live queries the real data they fell back on
-		// (without the removed layers), then let them refetch, joining a refetch already in flight.
-		if (entry.stale) {
-			this.#retract(cacheKey, entry.layers.reduce(applyLayer, entry.base), true);
-			return;
-		}
-
-		if (entry.layers.length > 0) {
-			await this.#render(cacheKey, entry);
-			return;
-		}
-
-		// The last layer is gone: restore the real data. If the entry expired meanwhile, only live queries get it
-		// back (they would otherwise keep showing the removed layer); nothing is written to the cache.
-		const cache = this.#configuration.cache;
-		const expired = cache !== undefined && (await this.#read(cacheKey)) === undefined;
-
-		if (expired) this.#retract(cacheKey, entry.base, entry.base === undefined);
-		else await this.#render(cacheKey, entry);
-	}
-
-	/**
-	 * Whether an invalidation covering a key is still listing or deleting keys.
+	 * Whether an invalidation in progress still has to delete a key.
 	 *
 	 * @param cacheKey - The serialized cache key
 	 * @returns `true` while such an invalidation is in progress
 	 */
 	#isInvalidating(cacheKey: string): boolean {
-		for (const prefix of this.#shared.invalidating) if (matchesKeyPrefix(cacheKey, prefix)) return true;
+		const { invalidating, stored } = this.#shared;
+
+		for (const { prefix, epoch, pending } of invalidating) {
+			// Still to be deleted (not listed yet, or listed and pending), unless newer data was stored meanwhile.
+			if (
+				matchesKeyPrefix(cacheKey, prefix) &&
+				(pending === undefined || pending.has(cacheKey)) &&
+				(stored.get(cacheKey) ?? -1) < epoch
+			) {
+				return true;
+			}
+		}
 
 		return false;
 	}
@@ -1573,14 +1737,20 @@ export class Client {
 
 		const visible = deepFreeze(entry.layers.reduce(applyLayer, entry.base));
 
-		if (visible === undefined) {
-			await this.#drop(cacheKey);
-			this.#retract(cacheKey, undefined, true);
-
-			return;
+		try {
+			if (visible === undefined) await this.#drop(cacheKey);
+			else await this.#put(cacheKey, visible);
+		} catch (error) {
+			// The cache failed (the key reads as a miss now): live queries still move on, never keeping e.g. a
+			// rolled-back layer on screen.
+			this.#retract(cacheKey, visible, visible === undefined);
+			throw error;
 		}
 
-		await this.#put(cacheKey, visible);
+		if (visible === undefined) {
+			this.#retract(cacheKey, undefined, true);
+			return;
+		}
 
 		// Invalidated while the cache was writing: the invalidation may have listed the keys before this write landed.
 		if (entry.stale) {
@@ -1598,12 +1768,13 @@ export class Client {
 	 * @param cacheKey - The serialized cache key
 	 * @param data - The data to show (`undefined` when no real data is known)
 	 * @param refetch - Whether the live queries should refetch
+	 * @param replace - Whether to replace what they show (otherwise they only refetch)
 	 */
-	#retract(cacheKey: string, data: unknown, refetch: boolean): void {
+	#retract(cacheKey: string, data: unknown, refetch: boolean, replace = true): void {
 		deepFreeze(data);
 
 		for (const watcher of [...(this.#shared.watchers.get(cacheKey) ?? [])]) {
-			watcher.replace(data);
+			if (replace) watcher.replace(data);
 			if (refetch) watcher.invalidate();
 		}
 	}
@@ -1622,20 +1793,6 @@ export class Client {
 		// Only ever called with real data (network results, no-cache fetches, merged pages): cache hits are read back
 		// from the cache, which already holds the layers.
 		return deepFreeze(entry ? (entry.layers.reduce(applyLayer, data) as TData) : data);
-	}
-
-	/**
-	 * Returns the real data under an entry's optimistic layers, or `visible` when it has none.
-	 *
-	 * @template TData - The shape of the data
-	 * @param cacheKey - The serialized cache key
-	 * @param visible - The data currently shown
-	 * @returns The real data
-	 */
-	#real<TData>(cacheKey: string, visible: TData | undefined): TData | undefined {
-		const entry = this.#shared.layers.get(cacheKey);
-
-		return entry ? (entry.base as TData | undefined) : visible;
 	}
 
 	/**
@@ -1717,16 +1874,17 @@ export class Client {
 		} else {
 			active.delete(cacheKey);
 			applied.delete(cacheKey);
-		}
-	}
 
-	/**
-	 * Returns the current invalidation epoch.
-	 *
-	 * @returns The epoch
-	 */
-	#epoch(): number {
-		return registry.sequence;
+			const client = this;
+			const entry = this.#shared.layers.get(cacheKey);
+
+			// No request left to bring older real data: committed layers can become part of the real data.
+			if (entry && entry.layers.length > 0 && !entry.layers.some(isPending)) {
+				this.#lane(cacheKey, function collapse(): Promise<void> {
+					return client.#settleEntry(cacheKey, entry, true);
+				}).catch(ignoreError);
+			}
+		}
 	}
 
 	/**
@@ -1802,6 +1960,16 @@ export class Client {
 }
 
 /**
+ * Whether a fetch policy serves cached data.
+ *
+ * @param fetchPolicy - The fetch policy
+ * @returns `true` for the policies reading the cache
+ */
+function readsCache(fetchPolicy: FetchPolicy): boolean {
+	return fetchPolicy === "cache-first" || fetchPolicy === "cache-only" || fetchPolicy === "cache-and-network";
+}
+
+/**
  * Creates the ClientError for a result carrying GraphQL errors.
  *
  * @param response - The fetch Response, absent for non-HTTP transports
@@ -1817,7 +1985,23 @@ function createGraphQLError(
 	const summary = errors.map(getMessage).join("; ");
 	const message = !response || response.ok ? summary : `${describeStatus(response)}: ${summary}`;
 
-	return new ClientError(message, { status: response?.status ?? 0, response, errors, data });
+	return responseError(message, response, { errors, data });
+}
+
+/**
+ * Creates a ClientError carrying a response (or none, for non-HTTP transports) and its status.
+ *
+ * @param message - Human-readable summary
+ * @param response - The fetch Response, absent for non-HTTP transports
+ * @param details - Other details of the failure
+ * @returns The error
+ */
+function responseError(
+	message: string,
+	response: Response | undefined,
+	details?: Omit<ClientErrorDetails, "status" | "response">,
+): ClientError {
+	return new ClientError(message, { ...details, status: response?.status ?? 0, response });
 }
 
 /**
@@ -1844,20 +2028,7 @@ function applyLayer(current: unknown, layer: OptimisticLayer): unknown {
  * @returns The error
  */
 function incompleteError(response: Response | undefined, data: unknown): ClientError {
-	return new ClientError("Incomplete incremental response.", {
-		status: response?.status ?? 0,
-		response,
-		data,
-	});
-}
-
-/**
- * Swallows an error.
- *
- * @returns `undefined`
- */
-function ignoreError(): undefined {
-	return undefined;
+	return responseError("Incomplete incremental response.", response, { data });
 }
 
 /**
@@ -1874,23 +2045,11 @@ async function* parseChunks(chunks: AsyncIterable<string>, response: Response): 
 		try {
 			payload = JSON.parse(chunk) as IncrementalPayload;
 		} catch (cause) {
-			throw new ClientError("Invalid JSON in the GraphQL response.", { status: response.status, response, cause });
+			throw responseError("Invalid GraphQL response.", response, { cause });
 		}
 
 		yield payload;
 	}
-}
-
-/**
- * Creates a filter matching serialized cache keys under a prefix.
- *
- * @param prefix - The key prefix
- * @returns The filter
- */
-function belongsTo(prefix: CacheKey): (key: string) => boolean {
-	return function belongsToPrefix(key: string): boolean {
-		return matchesKeyPrefix(key, prefix);
-	};
 }
 
 /**
@@ -2015,4 +2174,36 @@ function built(url: string, init: RequestInit): Request {
 	requestInits.set(request, init);
 
 	return request;
+}
+
+/**
+ * `filter` callback keeping optimistic layers whose operation is still pending.
+ *
+ * @param layer - The layer
+ * @returns Whether the layer is pending
+ */
+function isPending(layer: OptimisticLayer): boolean {
+	return !layer.committed;
+}
+
+/**
+ * The real data of an optimistic entry, including the effects of succeeded operations: what a snapshot may ship.
+ *
+ * @param entry - The entry
+ * @returns The data, or `undefined` when unknown
+ */
+function committedData(entry: OptimisticEntry): unknown {
+	if (entry.stale || entry.base === undefined) return undefined;
+
+	return entry.layers.filter(isCommitted).reduce(applyLayer, entry.base);
+}
+
+/**
+ * `filter` callback keeping committed optimistic layers.
+ *
+ * @param layer - The layer
+ * @returns Whether the layer is committed
+ */
+function isCommitted(layer: OptimisticLayer): boolean {
+	return layer.committed === true;
 }

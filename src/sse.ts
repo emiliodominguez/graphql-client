@@ -1,3 +1,6 @@
+import { rethrowNetworkFailure } from "./retry";
+import { ignoreError, onAbort } from "./utils";
+
 /**
  * A parsed Server-Sent Event.
  */
@@ -44,8 +47,10 @@ export async function* readDelimited(
 	signal?: AbortSignal,
 	initial = "",
 ): AsyncGenerator<[segment: string, rest: string]> {
-	const reader = stream.getReader();
-	const release = cancelOnAbort(reader, signal);
+	const reader = getReader(stream);
+	const release = onAbort(signal, function cancel(): void {
+		reader.cancel(signal?.reason).catch(ignoreError);
+	});
 	const decoder = new TextDecoder();
 	const overlap = delimiter.length - 1;
 	let chunks = [initial];
@@ -55,7 +60,8 @@ export async function* readDelimited(
 
 	try {
 		while (!finished) {
-			const { done, value } = await reader.read();
+			// A body failing mid-read (connection reset) is a network failure, retryable like one.
+			const { done, value } = await reader.read().catch(rethrowNetworkFailure);
 			// A trailing CR may be the first half of a CRLF pair: it is held back until the next chunk.
 			let text: string = (carry ? "\r" : "") + decoder.decode(value, { stream: !done });
 
@@ -87,7 +93,7 @@ export async function* readDelimited(
 	} finally {
 		release();
 
-		if (!finished) await reader.cancel().catch(ignore);
+		if (!finished) await reader.cancel().catch(ignoreError);
 
 		reader.releaseLock();
 	}
@@ -120,29 +126,27 @@ function parseEvent(block: string): ServerSentEvent | undefined {
 }
 
 /**
- * Cancels a stream reader when a signal aborts, so pending reads settle.
+ * Gets a reader for a response body. node-fetch (and cross-fetch on Node) expose a Node.js `Readable`, which is
+ * async-iterable but has no `getReader`.
  *
- * @param reader - The stream reader
- * @param signal - The abort signal
- * @returns Removes the abort listener
+ * @param stream - The response body
+ * @returns A reader (the subset this module uses)
  */
-export function cancelOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): () => void {
-	/**
-	 * Cancels the reader with the abort reason.
-	 */
-	function cancel(): void {
-		reader.cancel(signal?.reason).catch(ignore);
-	}
+function getReader(
+	stream: ReadableStream<Uint8Array>,
+): Pick<ReadableStreamDefaultReader<Uint8Array>, "read" | "cancel" | "releaseLock"> {
+	if (typeof stream.getReader === "function") return stream.getReader();
 
-	if (signal?.aborted) cancel();
-	else signal?.addEventListener("abort", cancel, { once: true });
+	const iterator = (stream as unknown as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
 
-	return function release(): void {
-		signal?.removeEventListener("abort", cancel);
+	return {
+		read: function read(): Promise<ReadableStreamReadResult<Uint8Array>> {
+			return iterator.next() as Promise<ReadableStreamReadResult<Uint8Array>>;
+		},
+		cancel: async function cancel(): Promise<void> {
+			// Ending the iteration destroys the Node.js stream.
+			await iterator.return?.();
+		},
+		releaseLock: function releaseLock(): void {},
 	};
 }
-
-/**
- * Swallows a rejection.
- */
-function ignore(): void {}

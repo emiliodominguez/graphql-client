@@ -1,3 +1,5 @@
+import { isObject } from "./utils";
+
 /**
  * Checks whether a value is a file-like `Blob` (including `File`).
  *
@@ -15,7 +17,7 @@ function isFile(value: unknown): value is Blob {
  * @returns `true` for objects whose prototype is `Object.prototype`
  */
 function isObjectLiteral(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype;
+	return isObject(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 /**
@@ -48,9 +50,7 @@ export function extractFiles(value: unknown, files: Map<Blob, string[]>, path = 
 	for (const key of Object.keys(value)) {
 		// Spec paths are dot-separated without escaping: the server would look for the file elsewhere.
 		if (key.includes(".") && containsFiles(value[key])) {
-			throw new TypeError(
-				`Cannot upload files under "${path}.${key}": object keys on a file path cannot contain dots.`,
-			);
+			throw new TypeError(`Cannot upload files under "${path}.${key}": keys on a file path cannot contain dots.`);
 		}
 
 		clone[key] = extractFiles(value[key], files, `${path}.${key}`);
