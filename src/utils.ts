@@ -228,21 +228,36 @@ export async function resolveValue<T>(resolver: T | (() => MaybePromise<T>)): Pr
 /**
  * Deeply freezes plain data, in place. Results are shared by the cache, deduplicated callers and every live query
  * showing them: a consumer mutating one (e.g. `data.items.sort()`) would silently corrupt all the others.
- * Typed arrays (which cannot be frozen) and already frozen objects are skipped.
+ * Typed arrays (which cannot be frozen) are skipped.
  *
  * @template T - The value type
  * @param value - Any value
  * @returns The same value
  */
 export function deepFreeze<T>(value: T): T {
-	if (value === null || typeof value !== "object" || Object.isFrozen(value) || ArrayBuffer.isView(value)) return value;
+	// Iterative: valid data can be nested deeper than the call stack allows.
+	const pending: unknown[] = [value];
 
-	Object.freeze(value);
+	while (pending.length > 0) {
+		const current = pending.pop();
 
-	for (const key of Object.keys(value)) deepFreeze((value as Record<string, unknown>)[key]);
+		if (current === null || typeof current !== "object" || frozen.has(current) || ArrayBuffer.isView(current)) {
+			continue;
+		}
+
+		Object.freeze(current);
+		frozen.add(current);
+
+		for (const key of Object.keys(current)) pending.push((current as Record<string, unknown>)[key]);
+	}
 
 	return value;
 }
+
+/**
+ * Objects already deeply frozen. `Object.isFrozen` is not enough: a shallowly frozen object may hold mutable children.
+ */
+const frozen = new WeakSet<object>();
 
 /**
  * Settles like `promise`, or rejects with the abort reason as soon as `signal` aborts.

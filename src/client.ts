@@ -83,6 +83,10 @@ interface SharedState {
 	floor: number;
 	/** Pending optimistic layers per cache key, rendered on top of the entry's real (base) data */
 	layers: Map<string, OptimisticEntry>;
+	/** Token of the newest store in progress per cache key (only that store may clean up after an invalidation) */
+	writing: Map<string, number>;
+	/** Optimistic base reads in progress per cache key, flagged when real data is stored meanwhile */
+	reading: Map<string, Set<{ dirty: boolean }>>;
 }
 
 /**
@@ -124,7 +128,7 @@ const sharedStates = new WeakMap<object, SharedState>();
 let sequence = 0;
 
 /**
- * Number of completed stores, across every client: detects real data landing while an optimistic base is read.
+ * Counter identifying stores.
  */
 let stores = 0;
 
@@ -145,6 +149,8 @@ function getSharedState(owner: object): SharedState {
 			invalidations: [],
 			floor: 0,
 			layers: new Map(),
+			writing: new Map(),
+			reading: new Map(),
 		};
 		sharedStates.set(owner, state);
 	}
@@ -398,10 +404,15 @@ export class Client {
 					INCREMENTAL_DIRECTIVE.test(query) ? `text/event-stream, ${MULTIPART_ACCEPT}` : "text/event-stream",
 				);
 
-				response = await raceAbort(
-					this.#run(this.#createRequest(request, "POST", headers, scope.signal), context),
-					scope.signal,
-				);
+				const pending = this.#run(this.#createRequest(request, "POST", headers, scope.signal), context);
+
+				try {
+					response = await raceAbort(pending, scope.signal);
+				} catch (error) {
+					// A response landing after the abort (fetch or middleware ignoring the signal) is never read: release it.
+					pending.then(discardBody, ignoreError);
+					throw error;
+				}
 
 				const contentType = response.headers.get("Content-Type") ?? "";
 				// Media types are case-insensitive (the boundary value is not).
@@ -749,12 +760,17 @@ export class Client {
 				// mutation the server applied must not look failed and invite a non-idempotent retry).
 				try {
 					if (writesCache && this.#supersede(cacheKey, order)) await this.#store(cacheKey, data);
-
-					for (const prefix of options.invalidates ?? []) {
-						await this.invalidate(prefix);
-					}
 				} catch (error) {
 					this.#report(error, context, options.signal);
+				}
+
+				// Each prefix is applied even when another one fails.
+				for (const prefix of options.invalidates ?? []) {
+					try {
+						await this.invalidate(prefix);
+					} catch (error) {
+						this.#report(error, context, options.signal);
+					}
 				}
 
 				return data;
@@ -1128,11 +1144,7 @@ export class Client {
 				let base = existing?.base;
 
 				if (!existing && cache) {
-					// Re-read when real data was stored meanwhile: a rollback must never restore older data.
-					for (let stored = -1; stored !== stores;) {
-						stored = stores;
-						base = await cache.get(cacheKey);
-					}
+					base = await this.#readBase(cacheKey, cache);
 				} else if (!existing) {
 					base = this.#peekWatchers(cacheKey);
 				}
@@ -1163,11 +1175,14 @@ export class Client {
 	 * @param data - The real data
 	 */
 	async #store(cacheKey: string, data: unknown): Promise<void> {
-		const entry = this.#shared.layers.get(cacheKey);
-
-		deepFreeze(data);
+		const { layers, writing, reading } = this.#shared;
+		const entry = layers.get(cacheKey);
 		const cache = this.#configuration.cache;
 		const epoch = sequence;
+		const token = ++stores;
+
+		deepFreeze(data);
+		writing.set(cacheKey, token);
 
 		try {
 			if (entry) {
@@ -1179,16 +1194,60 @@ export class Client {
 
 			await cache?.set(cacheKey, data);
 
-			// An invalidation issued while a slow cache was writing wins: the data it was meant to drop goes too.
+			// An invalidation issued while a slow cache was writing wins: the data it was meant to drop goes too,
+			// unless a newer store owns the entry by now.
 			if (cache && this.#invalidatedSince(cacheKey, epoch)) {
-				await cache.delete(cacheKey);
+				if (writing.get(cacheKey) === token) await cache.delete(cacheKey);
+				return;
+			}
+
+			// An optimistic layer applied while the cache was writing sits on older data: this is its base now.
+			const late = layers.get(cacheKey);
+
+			if (late) {
+				late.base = data;
+				late.stale = false;
+				await this.#render(cacheKey, late);
 				return;
 			}
 
 			this.#notify(cacheKey, data);
 		} finally {
-			stores++;
+			if (writing.get(cacheKey) === token) writing.delete(cacheKey);
+
+			for (const read of reading.get(cacheKey) ?? []) read.dirty = true;
 		}
+	}
+
+	/**
+	 * Reads the real data an optimistic layer goes on top of, re-reading (a few times at most) when real data was
+	 * stored meanwhile: a rollback must never restore older data.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param cache - The cache
+	 * @returns The real data, if any
+	 */
+	async #readBase(cacheKey: string, cache: CacheAdapter): Promise<unknown> {
+		const { reading } = this.#shared;
+		const read = { dirty: true };
+		const reads = reading.get(cacheKey) ?? new Set();
+		let base: unknown;
+
+		reads.add(read);
+		reading.set(cacheKey, reads);
+
+		try {
+			for (let attempt = 0; read.dirty && attempt < 5; attempt++) {
+				read.dirty = false;
+				base = await cache.get(cacheKey);
+			}
+		} finally {
+			reads.delete(read);
+
+			if (reads.size === 0) reading.delete(cacheKey);
+		}
+
+		return base;
 	}
 
 	/**
@@ -1622,7 +1681,17 @@ function syncValue<T>(value: T | Promise<T> | undefined): T | undefined {
  * @returns The callback
  */
 function removeFrom(cache: CacheAdapter): (key: string) => unknown {
-	return function remove(key: string): unknown {
-		return cache.delete(key);
+	return async function remove(key: string): Promise<void> {
+		// Async: a synchronous throw becomes a rejection instead of skipping the remaining keys.
+		await cache.delete(key);
 	};
+}
+
+/**
+ * Cancels the body of a response that will never be read, releasing its connection.
+ *
+ * @param response - The unwanted response
+ */
+function discardBody(response: Response): void {
+	response.body?.cancel().catch(ignoreError);
 }

@@ -352,6 +352,8 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 			if (sinks.size === 0 && socket) {
 				const idle = socket;
 
+				// An intentional close is not a failure: the next connection starts with a full retry budget.
+				attempt = 0;
 				socket = undefined;
 				clearTimers();
 				idle.close(1000, "Normal Closure");

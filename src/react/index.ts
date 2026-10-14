@@ -252,7 +252,6 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 	const client = useClient();
 	const identity = getIdentity(options);
 	const requests = getSuspenseRequests(client);
-	const latestOptions = useLatest(options);
 
 	// Suspended renders discard memoized values, so the ref that loaded while suspended is adopted from the entry.
 	// Reusing the same ref (instead of seeding a new one) keeps its freshness tracking, e.g. missed invalidations.
@@ -260,15 +259,18 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 		function resolveRef(): QueryRef<TData, TVariables> {
 			const entry = requests.get(identity);
 
-			return (
-				(entry?.ref as QueryRef<TData, TVariables> | undefined) ??
-				client.watch<TData, TVariables>(withLatestRequestOptions(options, latestOptions))
-			);
+			return (entry?.ref as QueryRef<TData, TVariables> | undefined) ?? createSuspenseRef(client, options);
 		},
 		// `identity` captures every option that defines the query.
 		[client, requests, identity],
 	);
 	const state = useSyncExternalStore(ref.subscribe, ref.getState, ref.getState);
+
+	useEffect(function updateLatestOptions(): void {
+		const latest = latestSuspenseOptions.get(ref as QueryRef<unknown, unknown>);
+
+		if (latest) latest.current = options;
+	});
 
 	useEffect(
 		function releaseSuspenseEntry(): void {
@@ -635,6 +637,33 @@ function useQueryRef<TData, TVariables extends object>(
 		// `identity` captures every option that defines the query.
 		[client, identity],
 	);
+}
+
+/**
+ * Latest options of each suspense query. The query is created during a suspended render whose hooks React discards,
+ * so the box is attached to the query itself and updated by whichever committed render uses it.
+ */
+const latestSuspenseOptions = new WeakMap<QueryRef<unknown, unknown>, { current: unknown }>();
+
+/**
+ * Creates the live query of a suspense hook, reading request settings from its latest committed options.
+ *
+ * @template TData - The shape of the `data` field
+ * @template TVariables - The shape of the operation variables
+ * @param client - The client
+ * @param options - The options of the render creating it
+ * @returns The live query
+ */
+function createSuspenseRef<TData, TVariables extends object>(
+	client: Client,
+	options: Partial<UseQueryOptions<TData, TVariables>>,
+): QueryRef<TData, TVariables> {
+	const latest = { current: options };
+	const ref = client.watch<TData, TVariables>(withLatestRequestOptions(options, latest));
+
+	latestSuspenseOptions.set(ref as QueryRef<unknown, unknown>, latest as { current: unknown });
+
+	return ref;
 }
 
 /**
