@@ -86,6 +86,16 @@
 		},
 		"./package.json": "./package.json"
 	},
+	"typesVersions": {
+		"*": {
+			"react": [
+				"./dist/react.d.ts"
+			],
+			"ws": [
+				"./dist/ws.d.ts"
+			]
+		}
+	},
 	"files": [
 		"dist"
 	],
@@ -108,7 +118,8 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"size": "node scripts/size.js",
-		"prepublishOnly": "yarn typecheck && yarn test && yarn build"
+		"prepublishOnly": "yarn typecheck && yarn test && yarn build",
+		"check:exports": "attw --pack ."
 	},
 	"peerDependencies": {
 		"react": ">=18"
@@ -119,6 +130,7 @@
 		}
 	},
 	"devDependencies": {
+		"@arethetypeswrong/cli": "^0.18.5",
 		"@testing-library/dom": "^10.4.2",
 		"@testing-library/react": "^16.3.3",
 		"@types/node": "^22",

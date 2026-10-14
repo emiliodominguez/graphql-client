@@ -517,6 +517,7 @@ yarn coverage      # tests with coverage thresholds
 yarn typecheck
 yarn build         # ESM + CJS + .d.ts via tsup
 yarn size          # bundle sizes + budget
+yarn check:exports # validates package exports/types for every resolution mode
 yarn demo          # builds and runs examples/rick-and-morty.js
 ```
 
