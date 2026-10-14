@@ -27,6 +27,12 @@ const FATAL_CLOSE_CODES = new Set([1002, 1003, 4400, 4401, 4403, 4406, 4409, 442
 const TERMINATED = 4499;
 
 /**
+ * How long a connection must stay up for its close to be treated as a fresh failure (full retry budget). A server
+ * accepting then dropping every connection exhausts `retryAttempts` instead of being retried forever.
+ */
+const STABLE_CONNECTION = 10_000;
+
+/**
  * Configuration for {@link createWebSocketTransport}.
  */
 export interface WebSocketTransportOptions {
@@ -46,6 +52,11 @@ export interface WebSocketTransportOptions {
 	connectionAckTimeout?: number | undefined;
 	/** Send a ping at this interval and reconnect if the previous one got no pong. Disabled by default. */
 	keepAlive?: number | undefined;
+	/**
+	 * Maximum results buffered per subscription while its consumer is busy. Beyond it the subscription fails with a
+	 * `RangeError` instead of growing memory without bound. Defaults to `1_000`.
+	 */
+	maxBufferedResults?: number | undefined;
 }
 
 /**
@@ -109,11 +120,13 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 		retryDelay = defaultRetryDelay,
 		connectionAckTimeout = 10_000,
 		keepAlive = 0,
+		maxBufferedResults = 1_000,
 	} = options;
 	const sinks = new Map<string, Sink>();
 	const timers = new Set<ReturnType<typeof setTimeout>>();
 	let socket: WebSocket | undefined;
 	let acknowledged = false;
+	let acknowledgedAt = 0;
 	let awaitingPong = false;
 	let attempt = 0;
 	let nextId = 0;
@@ -235,7 +248,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 				if (acknowledged) break;
 
 				acknowledged = true;
-				attempt = 0;
+				acknowledgedAt = Date.now();
 				clearTimers();
 
 				for (const [id, active] of sinks) send(target, { id, type: "subscribe", payload: active.request });
@@ -296,6 +309,9 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	function closed(target: WebSocket, event: CloseEvent): void {
 		if (socket !== target) return;
 
+		// Only a connection that proved stable resets the retry budget.
+		if (acknowledged && Date.now() - acknowledgedAt >= STABLE_CONNECTION) attempt = 0;
+
 		socket = undefined;
 		awaitingPong = false;
 		clearTimers();
@@ -349,7 +365,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 			if (signal.aborted) return;
 
 			const id = String(++nextId);
-			const queue = new AsyncQueue<GraphQLResponse<unknown>>();
+			const queue = new AsyncQueue<GraphQLResponse<unknown>>(maxBufferedResults);
 
 			/**
 			 * Ends the stream when the consumer aborts.

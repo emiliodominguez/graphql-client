@@ -493,6 +493,7 @@ const client = new Client({
 - **One socket** carries every subscription. It opens lazily and closes when the last subscription ends (`lazyCloseTimeout`).
 - **Reconnects** with exponential backoff (`retryAttempts`, `retryDelay`) and **resubscribes** active operations. Fatal close codes, such as 4401 or 4403 for auth, fail the subscriptions instead of retrying.
 - **Server errors** surface as `ClientError`s with `status: 0` and no `response`.
+- **Bounded:** a subscription whose consumer falls more than `maxBufferedResults` (default 1,000) results behind fails with a `RangeError`, and a server that drops every connection right after accepting it exhausts `retryAttempts` instead of being retried forever.
 - **Custom runtimes:** pass `WebSocket` (for example the `ws` package) when there is no global `WebSocket`. Call `transport.dispose()` to shut it down.
 
 Need another protocol (Phoenix, Ably, Pusher)? Implement `SubscriptionTransport`: a `subscribe(request, signal)` method that returns an `AsyncIterable` of GraphQL results.

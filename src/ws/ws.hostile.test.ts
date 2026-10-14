@@ -389,3 +389,59 @@ describe("WebSocket transport attack: abort and dispose", function () {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 });
+
+describe("WebSocket transport attack: resource exhaustion", function () {
+	it("gives up on a server that accepts then drops every connection, instead of reconnecting forever", async function () {
+		const { client } = setup({ retryAttempts: 2 });
+		const sub = collect(client.subscribe({ query: SUBSCRIPTION }));
+
+		await flush();
+
+		for (let round = 0; round < 6 && !sub.state.settled; round++) {
+			const socket = await accept();
+
+			socket.drop(1011, "restarting");
+			await new Promise(function wait(resolve) {
+				setTimeout(resolve, 20);
+			});
+		}
+
+		await sub.done;
+
+		expect(FakeSocket.instances).toHaveLength(3);
+		expect(String(sub.state.error)).toContain("1011");
+	});
+
+	it("fails a subscription whose consumer falls too far behind, instead of buffering without bound", async function () {
+		const { client } = setup({ maxBufferedResults: 3 });
+		const iterator = client.subscribe({ query: SUBSCRIPTION })[Symbol.asyncIterator]();
+		const first = iterator.next();
+
+		await flush();
+
+		const socket = await accept();
+
+		for (let tick = 1; tick <= 10; tick++) socket.emit({ id: "1", type: "next", payload: { data: { tick } } });
+
+		expect(await first).toEqual({ done: false, value: { tick: 1 } });
+
+		const delivered: unknown[] = [];
+		let failure: unknown;
+
+		try {
+			for (;;) {
+				const result = await iterator.next();
+
+				if (result.done) break;
+
+				delivered.push(result.value);
+			}
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(delivered).toEqual([{ tick: 2 }, { tick: 3 }]);
+		expect(failure).toBeInstanceOf(RangeError);
+		expect(socket.sentOf("complete")).toEqual([{ id: "1", type: "complete" }]);
+	});
+});

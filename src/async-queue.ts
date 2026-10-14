@@ -25,12 +25,30 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 	#ended = false;
 
 	/**
+	 * Maximum number of buffered values.
+	 */
+	readonly #limit: number;
+
+	/**
+	 * @param limit - Maximum number of buffered values: a producer outpacing its consumer fails the queue instead of
+	 * growing memory without bound
+	 */
+	constructor(limit = Infinity) {
+		this.#limit = limit;
+	}
+
+	/**
 	 * Adds a value.
 	 *
 	 * @param value - The value
 	 */
 	push(value: T): void {
 		if (this.#ended) return;
+
+		if (this.#values.length >= this.#limit) {
+			this.fail(new RangeError(`More than ${this.#limit} results are waiting: the consumer is too slow.`));
+			return;
+		}
 
 		this.#values.push(value);
 		this.#notify();
