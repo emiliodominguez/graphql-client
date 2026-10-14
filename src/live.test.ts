@@ -558,3 +558,64 @@ describe("fetchMore", function () {
 		expect(merge).not.toHaveBeenCalled();
 	});
 });
+
+describe("cache-and-network", function () {
+	it("answers from the cache and refreshes it in the background", async function () {
+		const fetchMock = counter();
+		const client = createClient(fetchMock);
+
+		await client.write({ query: TODOS }, { n: 0 });
+
+		expect(await client.gql({ query: TODOS, fetchPolicy: "cache-and-network" })).toEqual({ n: 0 });
+
+		await flush();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(await client.read({ query: TODOS })).toEqual({ n: 1 });
+	});
+
+	it("fetches like network-only on a miss", async function () {
+		const fetchMock = counter();
+		const client = createClient(fetchMock);
+
+		expect(await client.gql({ query: TODOS, fetchPolicy: "cache-and-network" })).toEqual({ n: 1 });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("shows cached data in live queries, then the refreshed data", async function () {
+		const fetchMock = counter();
+		const client = createClient(fetchMock);
+
+		await client.write({ query: TODOS }, { n: 0 });
+
+		const ref = client.watch({ query: TODOS, fetchPolicy: "cache-and-network" });
+		const seen: unknown[] = [];
+		const unsubscribe = ref.subscribe(function (state) {
+			seen.push(state.data);
+		});
+
+		expect(seen[0]).toEqual({ n: 0 });
+
+		await flush();
+		expect(ref.getState().data).toEqual({ n: 1 });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		unsubscribe();
+	});
+
+	it("reports background refresh failures through onError without rejecting", async function () {
+		const onError = vi.fn();
+		const client = createClient(
+			vi.fn<typeof fetch>(async function () {
+				return Response.json({ errors: [{ message: "down" }] });
+			}),
+			{ onError },
+		);
+
+		await client.write({ query: TODOS }, { n: 0 });
+
+		expect(await client.gql({ query: TODOS, fetchPolicy: "cache-and-network" })).toEqual({ n: 0 });
+
+		await flush();
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(await client.read({ query: TODOS })).toEqual({ n: 0 });
+	});
+});

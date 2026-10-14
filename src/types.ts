@@ -255,6 +255,8 @@ export interface RequestOptions<TData, TVariables> {
 	/**
 	 * How the cache is used. Defaults to `cache-first` for queries and `no-cache` for mutations.
 	 * - `cache-first`: serve from the cache, fetch on a miss and store the result
+	 * - `cache-and-network`: serve from the cache and refresh it in the background (stale-while-revalidate);
+	 *   fetch like `network-only` on a miss
 	 * - `network-only`: always fetch, store the result
 	 * - `cache-only`: serve from the cache, throw on a miss
 	 * - `no-cache`: always fetch, never read nor write the cache
@@ -309,7 +311,7 @@ export type SubscribeOptions<TData, TVariables> = Pick<
 /**
  * Cache usage strategy for a request. See {@link RequestOptions.fetchPolicy}.
  */
-export type FetchPolicy = "cache-first" | "network-only" | "cache-only" | "no-cache";
+export type FetchPolicy = "cache-first" | "cache-and-network" | "network-only" | "cache-only" | "no-cache";
 
 /**
  * Snapshot of a watched query.

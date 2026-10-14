@@ -168,13 +168,23 @@ export class Client {
 		// Files have no stable identity in a cache key: never cache nor dedupe requests that carry them.
 		const hasFiles = extractFiles(options.variables).files.size > 0;
 		const fetchPolicy = hasFiles ? "no-cache" : (options.fetchPolicy ?? (isQuery ? "cache-first" : "no-cache"));
-		const readsCache = fetchPolicy === "cache-first" || fetchPolicy === "cache-only";
+		const readsCache =
+			fetchPolicy === "cache-first" || fetchPolicy === "cache-only" || fetchPolicy === "cache-and-network";
 
 		if (cache && readsCache) {
 			const cached = await cache.get<TData>(cacheKey);
 
 			if (cached !== undefined) {
 				this.log(operation, "cache hit");
+
+				// Stale-while-revalidate: answer now, refresh the entry (and every live query) in the background.
+				// Failures are reported through `onError` by the request itself.
+				if (fetchPolicy === "cache-and-network") {
+					this.request<TData, TVariables>(query, options, operation, cacheKey, "network-only", hasFiles).catch(
+						ignoreError,
+					);
+				}
+
 				return cached;
 			}
 		}
@@ -189,7 +199,10 @@ export class Client {
 		const rollback = options.optimistic?.length ? await this.applyOptimistic(options.optimistic) : undefined;
 
 		try {
-			return await this.request<TData, TVariables>(query, options, operation, cacheKey, fetchPolicy, hasFiles);
+			// On a miss, `cache-and-network` is a plain network request.
+			const networkPolicy = fetchPolicy === "cache-and-network" ? "network-only" : fetchPolicy;
+
+			return await this.request<TData, TVariables>(query, options, operation, cacheKey, networkPolicy, hasFiles);
 		} catch (error) {
 			await rollback?.();
 			throw error;
@@ -365,7 +378,8 @@ export class Client {
 		const readsCache =
 			options.fetchPolicy === undefined ||
 			options.fetchPolicy === "cache-first" ||
-			options.fetchPolicy === "cache-only";
+			options.fetchPolicy === "cache-only" ||
+			options.fetchPolicy === "cache-and-network";
 
 		return new QueryRef<TData, TVariables>(
 			{

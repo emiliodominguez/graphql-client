@@ -243,7 +243,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		const trustsCache = this.host.hasCache() && (this.options.initialData === undefined || this.fetched);
 		const missing = trustsCache ? cached === undefined : this.state.data === undefined;
 
-		if (missing || this.stale || fetchPolicy === "network-only") {
+		if (missing || this.stale || fetchPolicy === "network-only" || fetchPolicy === "cache-and-network") {
 			void this.fetch(
 				this.stale || fetchPolicy === "network-only" ? this.refreshPolicy() : (fetchPolicy ?? "cache-first"),
 			);

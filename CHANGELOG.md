@@ -4,6 +4,7 @@
 
 ### Added
 
+- The `cache-and-network` fetch policy (stale-while-revalidate). It answers from the cache, refreshes in the background, and updates live queries.
 - Type-level required variables. Omitting the `variables` a typed document requires is a compile error in `gql`, `watch`, `subscribe`, the hooks and `mutate`. `WithVariables` and `RequiredKeys` are exported.
 - `useLazyQuery`: an on-demand query that stays live once executed.
 - Strict persisted queries (`persistedQueries.strict`) for trusted documents and operation allow-lists.

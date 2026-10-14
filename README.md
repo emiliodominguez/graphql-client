@@ -23,7 +23,7 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 **Data**
 
 - **Document cache.** O(1) LRU with TTL (`MemoryCache`), persistent `StorageCache`, or any sync or async adapter you write.
-- **Fetch policies.** `cache-first`, `network-only`, `cache-only` and `no-cache`. Mutations are never cached by default.
+- **Fetch policies.** `cache-first`, `cache-and-network` (stale-while-revalidate), `network-only`, `cache-only` and `no-cache`. Mutations are never cached by default.
 - **Deduplication and race safety.** Identical in-flight queries share one request, and the last request for a cache key always wins.
 - **Hierarchical invalidation.** `invalidate(["user"])` drops `["user", 1]`, `["user", 2, "posts"]` and so on. Mutations can do this declaratively with `invalidates`.
 - **Live queries.** `client.watch()` refetches on invalidation, polling, focus and reconnect, and keeps showing stale data while it revalidates.
@@ -129,12 +129,13 @@ const USER = graphql`
 
 Caching is enabled once a `cache` is configured. Choose a strategy per call with `fetchPolicy`:
 
-| Policy         | Reads cache | Network        | Writes cache | Default for |
-| -------------- | ----------- | -------------- | ------------ | ----------- |
-| `cache-first`  | Yes         | On a miss      | Yes          | queries     |
-| `network-only` | No          | Always         | Yes          |             |
-| `cache-only`   | Yes         | Never (throws) | No           |             |
-| `no-cache`     | No          | Always         | No           | mutations   |
+| Policy              | Reads cache | Network                            | Writes cache | Default for |
+| ------------------- | ----------- | ---------------------------------- | ------------ | ----------- |
+| `cache-first`       | Yes         | On a miss                          | Yes          | queries     |
+| `cache-and-network` | Yes         | Always, in the background on a hit | Yes          |             |
+| `network-only`      | No          | Always                             | Yes          |             |
+| `cache-only`        | Yes         | Never (throws)                     | No           |             |
+| `no-cache`          | No          | Always                             | No           | mutations   |
 
 The cache key combines your `key`, the document, the `variables` (independent of key order) and the `operationName`. `key` is optional. Set it when you want to group entries for invalidation.
 
