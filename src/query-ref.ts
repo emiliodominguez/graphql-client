@@ -34,8 +34,8 @@ export interface QueryHost<TData, TVariables> {
 	fetch(fetchPolicy: FetchPolicy): Promise<TData>;
 	/** Reads the cache synchronously when the cache allows it */
 	peek(): TData | undefined;
-	/** Reads the entry synchronously, whatever the fetch policy */
-	cached(): TData | undefined;
+	/** Reads the entry, whatever the fetch policy */
+	cached(): Promise<TData | undefined>;
 	/** Whether a cache is configured (so a missing entry means it was invalidated or expired) */
 	hasCache(): boolean;
 	/** Whether the entry currently has pending optimistic layers */
@@ -54,6 +54,8 @@ export interface QueryHost<TData, TVariables> {
 	real(visible: TData | undefined): TData | undefined;
 	/** Applies pending optimistic layers on top of real data */
 	overlay(data: TData): TData;
+	/** Reports an error thrown by a listener */
+	report(error: unknown): void;
 }
 
 /**
@@ -175,12 +177,12 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 */
 	subscribe(listener: QueryListener<TData>): () => void {
 		if (this.#listeners.has(listener)) {
-			listener(this.#state);
+			this.#call(listener, this.#state);
 			return this.#createUnsubscribe(listener);
 		}
 
 		this.#listeners.add(listener);
-		listener(this.#state);
+		this.#call(listener, this.#state);
 
 		clearTimeout(this.#deactivation);
 		this.#deactivation = undefined;
@@ -231,7 +233,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 			// Merge onto the real data: pending optimistic layers must stay layers, not become part of the pages.
 			// Merge onto the entry's current data, not onto this ref's possibly outdated snapshot.
 			const writes = this.#options.fetchPolicy !== "no-cache" && this.#host.hasCache();
-			const entry = writes ? this.#host.cached() : this.#state.data;
+			const entry = writes ? await this.#host.cached() : this.#state.data;
 
 			if (
 				writes &&
@@ -442,7 +444,22 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		this.#state = next;
 
-		for (const listener of [...this.#listeners]) listener(next);
+		for (const listener of [...this.#listeners]) this.#call(listener, next);
+	}
+
+	/**
+	 * Calls a listener. A throwing listener is reported, never allowed to break the query, the other listeners or
+	 * the operation that produced the state (e.g. an unrelated request writing the shared entry).
+	 *
+	 * @param listener - The listener
+	 * @param state - The state to deliver
+	 */
+	#call(listener: QueryListener<TData>, state: QueryState<TData>): void {
+		try {
+			listener(state);
+		} catch (error) {
+			this.#host.report(error);
+		}
 	}
 }
 

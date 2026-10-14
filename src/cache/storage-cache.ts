@@ -99,7 +99,12 @@ export class StorageCache implements Cache {
 		try {
 			storage.setItem(prefix + key, JSON.stringify(entry));
 		} catch {
-			// Quota exceeded or storage disabled: degrade to a cache miss.
+			// Quota exceeded or storage disabled: degrade to a cache miss, never keep the previous (outdated) value.
+			try {
+				storage.removeItem(prefix + key);
+			} catch {
+				// Storage disabled entirely: nothing is cached.
+			}
 		}
 	}
 

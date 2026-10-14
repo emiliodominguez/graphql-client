@@ -18,7 +18,7 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 - **Automatic Persisted Queries and GET.** Send small hashed requests that a CDN can cache. `minify()` shortens documents further.
 - **File uploads.** Follows the GraphQL multipart request spec, and switches on automatically when variables contain a `File` or `Blob`.
 - **`@defer` / `@stream`.** Incremental delivery over `multipart/mixed` or SSE, in both the current and the 2022 payload formats.
-- **Subscriptions over SSE or WebSocket.** GraphQL over SSE built in, or a zero-dependency `graphql-transport-ws` transport (`/ws`, ~1.5 kB) with reconnects and keep-alive. Any other transport plugs in the same way.
+- **Subscriptions over SSE or WebSocket.** GraphQL over SSE built in, or a zero-dependency `graphql-transport-ws` transport (`/ws`, ~1.6 kB) with reconnects and keep-alive. Any other transport plugs in the same way.
 
 **Data**
 
@@ -601,9 +601,9 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                 | Size    |
 | -------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken) | ~7.6 kB |
-| `lumenql/react`                        | ~1.5 kB |
-| `lumenql/ws`                           | ~1.5 kB |
+| `Client` + `MemoryCache` (tree-shaken) | ~8.7 kB |
+| `lumenql/react`                        | ~1.7 kB |
+| `lumenql/ws`                           | ~1.6 kB |
 
 ## Development
 

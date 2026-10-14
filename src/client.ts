@@ -14,6 +14,7 @@ import { QueryRef, type QueryWatcher } from "./query-ref";
 import { resolveRetryPolicy, rethrowNetworkFailure } from "./retry";
 import { readServerSentEvents } from "./sse";
 import type {
+	Cache as CacheAdapter,
 	CacheKey,
 	CacheTarget,
 	ClientConfiguration,
@@ -120,6 +121,11 @@ const sharedStates = new WeakMap<object, SharedState>();
  * Monotonic counter ordering requests, writes and invalidations across every client.
  */
 let sequence = 0;
+
+/**
+ * Number of completed stores, across every client: detects real data landing while an optimistic base is read.
+ */
+let stores = 0;
 
 /**
  * Returns the shared state of a cache, creating it on first use.
@@ -492,15 +498,11 @@ export class Client {
 					// Pending optimistic layers stay visible on top of freshly fetched data.
 					return client.#overlay(cacheKey, data);
 				},
-				cached(): TData | undefined {
-					const cached = client.#configuration.cache?.get<TData>(cacheKey);
-
-					return cached instanceof Promise ? undefined : cached;
+				async cached(): Promise<TData | undefined> {
+					return client.#configuration.cache?.get<TData>(cacheKey);
 				},
 				peek(): TData | undefined {
-					const cached = readsCache ? client.#configuration.cache?.get<TData>(cacheKey) : undefined;
-
-					return cached instanceof Promise ? undefined : cached;
+					return readsCache ? syncValue(client.#configuration.cache?.get<TData>(cacheKey)) : undefined;
 				},
 				hasCache(): boolean {
 					return client.#configuration.cache !== undefined;
@@ -533,6 +535,12 @@ export class Client {
 				},
 				overlay(data: TData): TData {
 					return client.#overlay(cacheKey, data);
+				},
+				report(error: unknown): void {
+					const context = { ...parseOperation(query, options.operationName), query, variables: options.variables };
+
+					if (client.#configuration.onError) client.#report(error, { ...context, attempt: 0 }, undefined);
+					else console.error(error);
 				},
 			},
 			options,
@@ -617,8 +625,6 @@ export class Client {
 	 */
 	async invalidate(prefix: CacheKey = []): Promise<number> {
 		const cache = this.#configuration.cache;
-		const keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
-
 		const shared = this.#shared;
 		const inFlight = this.#inFlight;
 		const epoch = ++sequence;
@@ -641,17 +647,28 @@ export class Client {
 
 		if (shared.invalidations.length > INVALIDATION_LOG_SIZE) shared.floor = shared.invalidations.shift()!.epoch;
 
-		await Promise.all(
-			keys.map(function remove(key: string): unknown {
-				return cache?.delete(key);
-			}),
-		);
+		// Read after recording the invalidation: a response landing meanwhile is already superseded.
+		let keys: string[] = [];
+		let failure: { error: unknown } | undefined;
 
+		try {
+			keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
+
+			for (const result of await Promise.allSettled(keys.map(removeFrom(cache!)))) {
+				if (result.status === "rejected") failure ??= { error: result.reason };
+			}
+		} catch (error) {
+			failure = { error };
+		}
+
+		// Live queries refetch even when the cache failed to drop their entries.
 		for (const [key, watchers] of shared.watchers) {
 			if (!matchesKeyPrefix(key, prefix)) continue;
 
 			for (const watcher of [...watchers]) watcher.invalidate();
 		}
+
+		if (failure) throw failure.error;
 
 		return keys.length;
 	}
@@ -698,20 +715,11 @@ export class Client {
 		try {
 			for (let attempt = 0; ; attempt++) {
 				const context: OperationContext = { ...operation, query, variables: options.variables, attempt };
+				let data: TData;
 
 				try {
 					// Raced against the signal: a stalled middleware, header resolver or body must not outlive the timeout.
-					const data = await raceAbort(this.#send<TData>(query, options, context, scope.signal), scope.signal);
-
-					this.#log(operation, `ok in ${Date.now() - startedAt}ms${attempt ? ` after ${attempt} retries` : ""}`);
-
-					if (writesCache && this.#supersede(cacheKey, order)) await this.#store(cacheKey, data);
-
-					for (const prefix of options.invalidates ?? []) {
-						await this.invalidate(prefix);
-					}
-
-					return data;
+					data = await raceAbort(this.#send<TData>(query, options, context, scope.signal), scope.signal);
 				} catch (error) {
 					if (scope.signal.aborted || !policy || attempt >= policy.attempts || !policy.retryIf(error, context)) {
 						this.#report(error, context, options.signal);
@@ -728,7 +736,25 @@ export class Client {
 						this.#report(sleepError, context, options.signal);
 						throw sleepError;
 					}
+
+					continue;
 				}
+
+				this.#log(operation, `ok in ${Date.now() - startedAt}ms${attempt ? ` after ${attempt} retries` : ""}`);
+
+				// The request succeeded: a failing cache is reported, never retried nor turned into a rejection (a
+				// mutation the server applied must not look failed and invite a non-idempotent retry).
+				try {
+					if (writesCache && this.#supersede(cacheKey, order)) await this.#store(cacheKey, data);
+
+					for (const prefix of options.invalidates ?? []) {
+						await this.invalidate(prefix);
+					}
+				} catch (error) {
+					this.#report(error, context, options.signal);
+				}
+
+				return data;
 			}
 		} finally {
 			scope.dispose();
@@ -1038,6 +1064,11 @@ export class Client {
 		 * @param commit - Whether the operation succeeded
 		 */
 		async function settle(commit: boolean): Promise<void> {
+			const touched = new Map<string, OptimisticEntry>();
+			let failure: { error: unknown } | undefined;
+
+			// Every layer is removed first (synchronously): a cache failing while rendering one entry must never
+			// strand the operation's other layers.
 			for (const { cacheKey, layer } of applied.splice(0).reverse()) {
 				const entry = layers.get(cacheKey);
 				const index = entry ? entry.layers.indexOf(layer) : -1;
@@ -1051,26 +1082,36 @@ export class Client {
 
 				if (entry.layers.length === 0) layers.delete(cacheKey);
 
-				// An invalidated entry is never rendered into the cache: show live queries the real data they fell
-				// back on (without this layer), then let them refetch, joining a refetch already in flight.
-				if (entry.stale) {
-					client.#retract(cacheKey, entry.layers.reduce(applyLayer, entry.base), true);
-					continue;
-				}
-
-				if (entry.layers.length > 0) {
-					await client.#render(cacheKey, entry);
-					continue;
-				}
-
-				// The last layer is gone: restore the real data. If the entry expired meanwhile, only live queries get
-				// it back (they would otherwise keep showing the removed layer); nothing is written to the cache.
-				const cache = client.#configuration.cache;
-				const expired = cache !== undefined && (await cache.get(cacheKey)) === undefined;
-
-				if (expired) client.#retract(cacheKey, entry.base, entry.base === undefined);
-				else await client.#render(cacheKey, entry);
+				touched.set(cacheKey, entry);
 			}
+
+			for (const [cacheKey, entry] of touched) {
+				try {
+					// An invalidated entry is never rendered into the cache: show live queries the real data they fell
+					// back on (without the removed layers), then let them refetch, joining a refetch already in flight.
+					if (entry.stale) {
+						client.#retract(cacheKey, entry.layers.reduce(applyLayer, entry.base), true);
+						continue;
+					}
+
+					if (entry.layers.length > 0) {
+						await client.#render(cacheKey, entry);
+						continue;
+					}
+
+					// The last layer is gone: restore the real data. If the entry expired meanwhile, only live queries
+					// get it back (they would otherwise keep showing the removed layer); nothing is written to the cache.
+					const cache = client.#configuration.cache;
+					const expired = cache !== undefined && (await cache.get(cacheKey)) === undefined;
+
+					if (expired) client.#retract(cacheKey, entry.base, entry.base === undefined);
+					else await client.#render(cacheKey, entry);
+				} catch (error) {
+					failure ??= { error };
+				}
+			}
+
+			if (failure) throw failure.error;
 		}
 
 		try {
@@ -1081,7 +1122,17 @@ export class Client {
 				const cache = this.#configuration.cache;
 				// With a cache, a miss means there is no real data: never adopt a live query's (possibly no-cache or
 				// invalidated) data as the base, it would be written to the cache when the layer settles.
-				const base = existing ? existing.base : cache ? await cache.get(cacheKey) : this.#peekWatchers(cacheKey);
+				let base = existing?.base;
+
+				if (!existing && cache) {
+					// Re-read when real data was stored meanwhile: a rollback must never restore older data.
+					for (let stored = -1; stored !== stores;) {
+						stored = stores;
+						base = await cache.get(cacheKey);
+					}
+				} else if (!existing) {
+					base = this.#peekWatchers(cacheKey);
+				}
 				// Another optimistic operation may have created the entry while the cache was read.
 				const entry = layers.get(cacheKey) ?? { base, layers: [], stale: false };
 				const layer: OptimisticLayer = { update };
@@ -1110,16 +1161,29 @@ export class Client {
 	 */
 	async #store(cacheKey: string, data: unknown): Promise<void> {
 		const entry = this.#shared.layers.get(cacheKey);
+		const cache = this.#configuration.cache;
+		const epoch = sequence;
 
-		if (entry) {
-			entry.base = data;
-			entry.stale = false;
-			await this.#render(cacheKey, entry);
-			return;
+		try {
+			if (entry) {
+				entry.base = data;
+				entry.stale = false;
+				await this.#render(cacheKey, entry);
+				return;
+			}
+
+			await cache?.set(cacheKey, data);
+
+			// An invalidation issued while a slow cache was writing wins: the data it was meant to drop goes too.
+			if (cache && this.#invalidatedSince(cacheKey, epoch)) {
+				await cache.delete(cacheKey);
+				return;
+			}
+
+			this.#notify(cacheKey, data);
+		} finally {
+			stores++;
 		}
-
-		await this.#configuration.cache?.set(cacheKey, data);
-		this.#notify(cacheKey, data);
 	}
 
 	/**
@@ -1528,4 +1592,32 @@ function getMessage(error: { message: string }): string {
  */
 function describeStatus(response: Response): string {
 	return response.statusText ? `HTTP ${response.status} ${response.statusText}` : `HTTP ${response.status}`;
+}
+
+/**
+ * Returns a cache read when it is synchronous. A pending (possibly rejecting) async read is discarded safely.
+ * Thenables are detected structurally: a promise from another realm (iframe, `vm`) is not an `instanceof Promise`.
+ *
+ * @template T - The value type
+ * @param value - The cache read
+ * @returns The value, or `undefined` for an async read
+ */
+function syncValue<T>(value: T | Promise<T> | undefined): T | undefined {
+	if (typeof (value as { then?: unknown } | undefined)?.then !== "function") return value as T | undefined;
+
+	Promise.resolve(value).catch(ignoreError);
+
+	return undefined;
+}
+
+/**
+ * Creates a `map` callback deleting keys from a cache.
+ *
+ * @param cache - The cache
+ * @returns The callback
+ */
+function removeFrom(cache: CacheAdapter): (key: string) => unknown {
+	return function remove(key: string): unknown {
+		return cache.delete(key);
+	};
 }
