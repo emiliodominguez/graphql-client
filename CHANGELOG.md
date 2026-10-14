@@ -29,6 +29,7 @@
 
 ### Changed
 
+- Clients that share a cache (for example via `extend()`) now also share live-query notifications and last-request-wins ordering.
 - `ClientError.response` is now optional, and `status` is `0` for non-HTTP transports.
 - **Breaking:** the per-call `cache?: boolean` option is replaced by `fetchPolicy`. Use `"no-cache"` for `cache: false` and `"cache-first"` for `cache: true`.
 - The last request for a cache key wins: a superseded response no longer overwrites the cache or notifies watchers.

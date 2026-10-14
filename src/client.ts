@@ -57,6 +57,46 @@ interface Payload {
 type TransportOptions = Pick<RequestOptions<unknown, unknown>, "variables" | "operationName" | "headers">;
 
 /**
+ * State that must be shared by every client using the same cache.
+ */
+interface SharedState {
+	/** Watched queries keyed by their cache key */
+	watchers: Map<string, Set<QueryWatcher<unknown>>>;
+	/**
+	 * Latest request sequence per cache key: a response superseded by a newer request for the same key
+	 * neither overwrites the cache nor notifies watchers (last request wins).
+	 */
+	latest: Map<string, number>;
+}
+
+/**
+ * Shared state per cache (or per client when it has no cache).
+ */
+const sharedStates = new WeakMap<object, SharedState>();
+
+/**
+ * Monotonic request counter feeding {@link SharedState.latest}.
+ */
+let requestSequence = 0;
+
+/**
+ * Returns the shared state of a cache, creating it on first use.
+ *
+ * @param owner - The cache, or the client itself when uncached
+ * @returns The shared state
+ */
+function getSharedState(owner: object): SharedState {
+	let state = sharedStates.get(owner);
+
+	if (!state) {
+		state = { watchers: new Map(), latest: new Map() };
+		sharedStates.set(owner, state);
+	}
+
+	return state;
+}
+
+/**
  * Lightweight, zero-dependency GraphQL client with caching, deduplication, retries, middleware,
  * persisted queries, uploads, incremental delivery, SSE subscriptions, live queries, timeouts and typed errors.
  */
@@ -77,25 +117,16 @@ export class Client {
 	private persistedQueriesSupported = true;
 
 	/**
-	 * Watched queries keyed by their cache key.
+	 * Watchers and request ordering, shared by every client using the same cache (see {@link Client.extend}).
 	 */
-	private readonly watchers = new Map<string, Set<QueryWatcher<unknown>>>();
-
-	/**
-	 * Latest request sequence per cache key: a response superseded by a newer request for the same key
-	 * neither overwrites the cache nor notifies watchers (last request wins).
-	 */
-	private readonly latest = new Map<string, number>();
-
-	/**
-	 * Monotonic request counter feeding {@link Client.latest}.
-	 */
-	private sequence = 0;
+	private readonly shared: SharedState;
 
 	/**
 	 * @param configuration - Configuration for the client
 	 */
-	constructor(private readonly configuration: ClientConfiguration) {}
+	constructor(private readonly configuration: ClientConfiguration) {
+		this.shared = getSharedState(configuration.cache ?? this);
+	}
 
 	/**
 	 * Executes a GraphQL query or mutation.
@@ -372,7 +403,7 @@ export class Client {
 			}),
 		);
 
-		for (const [key, watchers] of this.watchers) {
+		for (const [key, watchers] of this.shared.watchers) {
 			if (!matchesKeyPrefix(key, prefix)) continue;
 
 			for (const watcher of [...watchers]) watcher.invalidate();
@@ -383,7 +414,8 @@ export class Client {
 
 	/**
 	 * Creates a new client with the given configuration overrides. The cache instance is shared unless overridden,
-	 * which makes it handy for per-request headers in SSR. Overrides replace values; they are not deep-merged.
+	 * which makes it handy for per-request headers in SSR. Clients sharing a cache also share live-query
+	 * notifications and request ordering. Overrides replace values; they are not deep-merged.
 	 *
 	 * @param overrides - Configuration values to replace
 	 * @returns A new client
@@ -414,9 +446,10 @@ export class Client {
 		const scope = createAbortScope(options.signal, options.timeout ?? this.configuration.timeout);
 		const policy = resolveRetryPolicy(this.configuration.retry, options.retry);
 		const startedAt = Date.now();
-		const sequence = ++this.sequence;
+		const { latest } = this.shared;
+		const sequence = ++requestSequence;
 
-		this.latest.set(cacheKey, sequence);
+		latest.set(cacheKey, sequence);
 
 		try {
 			for (let attempt = 0; ; attempt++) {
@@ -427,8 +460,8 @@ export class Client {
 
 					this.log(operation, `ok in ${Date.now() - startedAt}ms${attempt ? ` after ${attempt} retries` : ""}`);
 
-					if (this.latest.get(cacheKey) === sequence) {
-						this.latest.delete(cacheKey);
+					if (latest.get(cacheKey) === sequence) {
+						latest.delete(cacheKey);
 
 						if (writesCache) await this.configuration.cache?.set(cacheKey, data);
 
@@ -455,7 +488,7 @@ export class Client {
 		} finally {
 			scope.dispose();
 
-			if (this.latest.get(cacheKey) === sequence) this.latest.delete(cacheKey);
+			if (latest.get(cacheKey) === sequence) latest.delete(cacheKey);
 		}
 	}
 
@@ -710,7 +743,7 @@ export class Client {
 	 * @returns The unregister function
 	 */
 	private register(cacheKey: string, watcher: QueryWatcher<unknown>): () => void {
-		const { watchers } = this;
+		const { watchers } = this.shared;
 		const set = watchers.get(cacheKey) ?? new Set();
 
 		set.add(watcher);
@@ -729,7 +762,7 @@ export class Client {
 	 * @param data - The data
 	 */
 	private notify(cacheKey: string, data: unknown): void {
-		for (const watcher of [...(this.watchers.get(cacheKey) ?? [])]) watcher.receive(data);
+		for (const watcher of [...(this.shared.watchers.get(cacheKey) ?? [])]) watcher.receive(data);
 	}
 
 	/**

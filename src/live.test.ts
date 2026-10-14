@@ -390,7 +390,23 @@ describe("watch", function () {
 
 		expect(await older).toEqual({ v: "old" });
 		expect(await client.read({ query: TODOS })).toEqual({ v: "new" });
-		expect(client["latest"].size).toBe(0);
+		expect(client["shared"].latest.size).toBe(0);
+	});
+
+	it("shares notifications with derived clients using the same cache", async function () {
+		const base = createClient(counter());
+		const scoped = base.extend({ authToken: "user" });
+		const isolated = base.extend({ cache: new MemoryCache() });
+		const ref = base.watch({ query: TODOS });
+		const unsubscribe = ref.subscribe(function () {});
+
+		await flush();
+		await scoped.write({ query: TODOS }, { n: 42 });
+		expect(ref.getState().data).toEqual({ n: 42 });
+
+		await isolated.write({ query: TODOS }, { n: 0 });
+		expect(ref.getState().data).toEqual({ n: 42 });
+		unsubscribe();
 	});
 
 	it("polls while observed and stops when the last listener leaves", async function () {
