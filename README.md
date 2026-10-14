@@ -1,11 +1,11 @@
 # GraphQL Client
 
 [![CI](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodominguez/graphql-client/actions/workflows/ci.yml)
-![Size](https://img.shields.io/badge/min%2Bgzip-~6%20kB-blue)
+![Size](https://img.shields.io/badge/min%2Bgzip-~6.8%20kB-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-A lightweight, zero-dependency, fully typed GraphQL client. It gives you the features of a heavier client in about 6 kB min+gzip, plus about 1.2 kB for the React hooks and about 1.5 kB for WebSockets.
+A lightweight, zero-dependency, fully typed GraphQL client. It gives you the features of a heavier client in about 6.8 kB min+gzip, plus about 1.3 kB for the React hooks and about 1.5 kB for WebSockets.
 
 **Transport**
 
@@ -548,8 +548,8 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                  | Size    |
 | --------------------------------------- | ------- |
-| `Client` + `MemoryCache` (tree-shaken)  | ~6.1 kB |
-| `@emiliodominguez/graphql-client/react` | ~1.2 kB |
+| `Client` + `MemoryCache` (tree-shaken)  | ~6.8 kB |
+| `@emiliodominguez/graphql-client/react` | ~1.3 kB |
 | `@emiliodominguez/graphql-client/ws`    | ~1.5 kB |
 
 ## Development

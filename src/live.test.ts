@@ -390,7 +390,8 @@ describe("watch", function () {
 
 		expect(await older).toEqual({ v: "old" });
 		expect(await client.read({ query: TODOS })).toEqual({ v: "new" });
-		expect(client["shared"].latest.size).toBe(0);
+		expect(client["shared"].active.size).toBe(0);
+		expect(client["shared"].applied.size).toBe(0);
 	});
 
 	it("shares notifications with derived clients using the same cache", async function () {

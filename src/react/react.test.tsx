@@ -1,11 +1,11 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { Component, StrictMode, Suspense, type ReactNode } from "react";
+import { Component, StrictMode, Suspense, useState, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryCache } from "../cache/memory-cache";
 import { Client } from "../client";
-import type { ClientConfiguration } from "../types";
+import type { ClientConfiguration, SubscriptionTransport } from "../types";
 import { GraphQLProvider, useClient, useMutation, useQuery, useSubscription, useSuspenseQuery } from "./index";
 
 const URL = "https://test.dev/graphql";
@@ -512,5 +512,126 @@ describe("useSubscription", function () {
 		await waitFor(function () {
 			expect(screen.getByTestId("ticker").textContent).toBe("-:closed:error");
 		});
+	});
+});
+
+describe("regressions", function () {
+	/**
+	 * Transport that ends quietly when aborted, like the WebSocket transport.
+	 */
+	const idleTransport: SubscriptionTransport = {
+		async *subscribe(_request, signal) {
+			await new Promise<void>(function (resolve) {
+				if (signal.aborted) resolve();
+				signal.addEventListener("abort", function () {
+					resolve();
+				});
+			});
+		},
+	};
+
+	/**
+	 * Shows whether the subscription is open.
+	 *
+	 * @param props - The variable
+	 * @returns The element
+	 */
+	function Status(props: { value: number }) {
+		const { active } = useSubscription({
+			query: "subscription S($value: Int) { s(value: $value) }",
+			variables: { value: props.value },
+		});
+
+		return <span data-testid="active">{String(active)}</span>;
+	}
+
+	/**
+	 * Lets effects and pending promises settle.
+	 */
+	async function settle(): Promise<void> {
+		await act(async function () {
+			await new Promise(function (resolve) {
+				setTimeout(resolve, 0);
+			});
+		});
+	}
+
+	it("useSubscription stays active across resubscribes and StrictMode", async function () {
+		const client = new Client({ url: URL, fetch: vi.fn(), subscriptionTransport: idleTransport });
+		let setValue!: (value: number) => void;
+
+		/**
+		 * Owns the variable.
+		 *
+		 * @returns The element
+		 */
+		function App() {
+			const [value, set] = useState(1);
+
+			setValue = set;
+
+			return <Status value={value} />;
+		}
+
+		render(
+			<StrictMode>
+				<GraphQLProvider client={client}>
+					<App />
+				</GraphQLProvider>
+			</StrictMode>,
+		);
+		await settle();
+		expect(screen.getByTestId("active").textContent).toBe("true");
+
+		await act(async function () {
+			setValue(2);
+		});
+		await settle();
+		expect(screen.getByTestId("active").textContent).toBe("true");
+	});
+
+	it("useSuspenseQuery refetches after an invalidation that happened while its tree was unmounted", async function () {
+		let n = 0;
+		const fetchMock = vi.fn<typeof fetch>(async function () {
+			return Response.json({ data: { n: ++n } });
+		});
+		const client = new Client({ url: URL, fetch: fetchMock, cache: new MemoryCache() });
+
+		/**
+		 * Suspense reader.
+		 *
+		 * @returns The element
+		 */
+		function Reader() {
+			const { data } = useSuspenseQuery<{ n: number }>({ key: ["n"], query: "query N { n }" });
+
+			return <span data-testid="n">{data.n}</span>;
+		}
+
+		/**
+		 * Renders the reader under suspense.
+		 *
+		 * @returns The element
+		 */
+		function Tree() {
+			return (
+				<GraphQLProvider client={client}>
+					<Suspense fallback="…">
+						<Reader />
+					</Suspense>
+				</GraphQLProvider>
+			);
+		}
+
+		render(<Tree />).unmount();
+		await settle();
+		await client.invalidate(["n"]);
+
+		render(<Tree />);
+
+		await waitFor(function () {
+			expect(screen.getByTestId("n").textContent).toBe("2");
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 });

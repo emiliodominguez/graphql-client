@@ -32,6 +32,10 @@ export interface QueryHost<TData, TVariables> {
 	peek(): TData | undefined;
 	/** Whether a cache is configured (so a missing entry means it was invalidated or expired) */
 	hasCache(): boolean;
+	/** Current invalidation epoch */
+	epoch(): number;
+	/** Whether this query's entry was invalidated after `epoch` */
+	invalidatedSince(epoch: number): boolean;
 	/** Starts receiving cache events; returns the unregister function */
 	register(watcher: QueryWatcher<TData>): () => void;
 	/** Fetches the same document with extra variables, bypassing the cache */
@@ -74,9 +78,19 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	private version = 0;
 
 	/**
-	 * Set when invalidated while inactive, so the next activation refetches.
+	 * Set when invalidated while active but before a refetch could start.
 	 */
 	private stale = false;
+
+	/**
+	 * Invalidation epoch the current data is fresh as of. Compared on activation to detect missed invalidations.
+	 */
+	private freshAsOf: number;
+
+	/**
+	 * Whether a fetch ever succeeded (after which `initialData` no longer counts as fresh).
+	 */
+	private fetched = false;
 
 	/**
 	 * @param host - The client bridge
@@ -92,6 +106,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		const data = host.peek() ?? options.initialData;
 
 		this.state = { data, error: undefined, loading: data === undefined };
+		this.freshAsOf = host.epoch();
 		this.getState = this.getState.bind(this);
 		this.subscribe = this.subscribe.bind(this);
 		this.refetch = this.refetch.bind(this);
@@ -115,6 +130,11 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @returns The unsubscribe function
 	 */
 	subscribe(listener: QueryListener<TData>): () => void {
+		if (this.listeners.has(listener)) {
+			listener(this.state);
+			return this.createUnsubscribe(listener);
+		}
+
 		this.listeners.add(listener);
 		listener(this.state);
 
@@ -148,16 +168,22 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 * @returns The resulting state
 	 */
 	async fetchMore(options: FetchMoreOptions<TData, TVariables>): Promise<QueryState<TData>> {
+		// Supersedes any in-flight refetch, whose older page must not overwrite the merged result.
+		const version = ++this.version;
+
 		this.setState({ data: this.state.data, error: undefined, loading: true });
 
 		try {
 			const next = await this.host.fetchMore(options.variables);
+
+			if (version !== this.version) return this.state;
+
 			const merged = this.state.data === undefined ? next : options.merge(this.state.data, next);
 
 			await this.host.write(merged);
 			this.setState({ data: merged, error: undefined, loading: false });
 		} catch (error) {
-			this.setState({ data: this.state.data, error, loading: false });
+			if (version === this.version) this.setState({ data: this.state.data, error, loading: false });
 		}
 
 		return this.state;
@@ -189,6 +215,7 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		this.teardowns.push(
 			this.host.register({
 				receive(data: TData): void {
+					ref.fetched = true;
 					ref.setState({ data, error: undefined, loading: ref.state.loading });
 				},
 				invalidate(): void {
@@ -203,10 +230,11 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 
 		if (cached !== undefined) this.setState({ data: cached, error: this.state.error, loading: this.state.loading });
 
-		const missing =
-			this.host.hasCache() && this.options.initialData === undefined
-				? cached === undefined
-				: this.state.data === undefined;
+		if (this.host.invalidatedSince(this.freshAsOf)) this.stale = true;
+
+		// `initialData` stands in for the cache only until the first fetch.
+		const trustsCache = this.host.hasCache() && (this.options.initialData === undefined || this.fetched);
+		const missing = trustsCache ? cached === undefined : this.state.data === undefined;
 
 		if (missing || this.stale || fetchPolicy === "network-only") {
 			void this.fetch(this.stale || fetchPolicy === "network-only" ? "network-only" : (fetchPolicy ?? "cache-first"));
@@ -231,6 +259,9 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 	 */
 	private deactivate(): void {
 		for (const teardown of this.teardowns.splice(0)) teardown();
+
+		// Invalidations were delivered directly while active; later ones are detected on reactivation.
+		this.freshAsOf = this.host.epoch();
 	}
 
 	/**
@@ -268,12 +299,16 @@ export class QueryRef<TData, TVariables = Record<string, unknown>> {
 		const version = ++this.version;
 
 		this.stale = false;
+		this.freshAsOf = this.host.epoch();
 		this.setState({ data: this.state.data, error: this.state.error, loading: true });
 
 		try {
 			const data = await this.host.fetch(fetchPolicy);
 
-			if (version === this.version) this.setState({ data, error: undefined, loading: false });
+			if (version === this.version) {
+				this.fetched = true;
+				this.setState({ data, error: undefined, loading: false });
+			}
 		} catch (error) {
 			if (version === this.version) this.setState({ data: this.state.data, error, loading: false });
 		}

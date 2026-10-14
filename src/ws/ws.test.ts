@@ -513,6 +513,82 @@ describe("WebSocket transport", function () {
 	});
 });
 
+describe("WebSocket transport regressions", function () {
+	it("ends immediately for an already-aborted signal without opening a socket", async function () {
+		const { client } = setup();
+		const result = await client.subscribe({ query: SUBSCRIPTION, signal: AbortSignal.abort() }).next();
+
+		expect(result.done).toBe(true);
+		expect(FakeSocket.instances).toHaveLength(0);
+	});
+
+	it("does not reconnect when every subscription ended before the retry timer", async function () {
+		const { client } = setup({ lazyCloseTimeout: 0 });
+		const controller = new AbortController();
+		const { done } = collect(client.subscribe({ query: SUBSCRIPTION, signal: controller.signal }));
+
+		await flush();
+		(await accept()).drop(1006);
+		controller.abort();
+		await done;
+		await new Promise(function (resolve) {
+			setTimeout(resolve, 30);
+		});
+
+		expect(FakeSocket.instances).toHaveLength(1);
+	});
+
+	it("closes an idle socket once acknowledged", async function () {
+		const { client } = setup({ lazyCloseTimeout: 0 });
+		const controller = new AbortController();
+		const { done } = collect(client.subscribe({ query: SUBSCRIPTION, signal: controller.signal }));
+
+		await flush();
+
+		const socket = latest();
+
+		socket.open();
+		await flush();
+		controller.abort();
+		await done;
+		socket.emit({ type: "connection_ack" });
+		await new Promise(function (resolve) {
+			setTimeout(resolve, 5);
+		});
+
+		expect(socket.closedWith?.code).toBe(1000);
+	});
+
+	it("gives new subscriptions a full retry budget after giving up", async function () {
+		const { client } = setup({ retryAttempts: 1 });
+		const first = collect(client.subscribe({ query: SUBSCRIPTION }));
+
+		await flush();
+		latest().drop(1006);
+		await new Promise(function (resolve) {
+			setTimeout(resolve, 30);
+		});
+		latest().drop(1006);
+		await first.done.catch(function () {});
+
+		const before = FakeSocket.instances.length;
+		const second = collect(client.subscribe({ query: SUBSCRIPTION }));
+
+		await flush();
+		latest().drop(1006);
+		await new Promise(function (resolve) {
+			setTimeout(resolve, 30);
+		});
+
+		expect(FakeSocket.instances.length - before).toBe(2);
+
+		const socket = await accept();
+
+		socket.emit({ id: "2", type: "complete" });
+		await second.done;
+	});
+});
+
 describe("AsyncQueue", function () {
 	it("buffers values, then ends or fails after draining", async function () {
 		const queue = new AsyncQueue<number>();

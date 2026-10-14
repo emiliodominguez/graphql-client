@@ -30,6 +30,21 @@
 - `client.extend()` for derived clients that share the cache.
 - A bundle size budget enforced in CI.
 
+### Fixed
+
+- An invalidation now supersedes requests already in flight: they no longer repopulate the cache, and refetches never join them.
+- `fetchMore` results are no longer overwritten by an older refetch that resolves later.
+- The ordering model is now last-applied-wins per cache key. `no-cache` requests no longer interfere with cache writes, an aborted newer request no longer discards an older success, and cache-writing and `no-cache` requests are never deduplicated together.
+- Live queries detect invalidations that happened while they were inactive, including on cacheless clients and with `initialData`.
+- `useSuspenseQuery` adopts the live query that loaded while suspended instead of seeding a new one, so a later invalidation is never missed. Unused entries expire.
+- `useSubscription` no longer reports `active: false` after a resubscribe or under StrictMode.
+- WebSocket: an already-aborted signal ends immediately, there are no reconnects once no subscriptions are left, an idle socket closes after the ack, and the retry budget resets after giving up.
+- `minify` no longer merges adjacent strings into a block string, and escaped `\"""` inside block strings is handled.
+- `dedupeFragments` handles fragments preceded by comments and object values in arguments.
+- Requests carrying files are never cached or deduplicated, since different files previously shared a key.
+- A failed persisted-query hash is retried instead of being memoized.
+- Subscribing the same listener twice no longer activates a query twice.
+
 ### Changed
 
 - Clients that share a cache (for example via `extend()`) now also share live-query notifications and last-request-wins ordering.

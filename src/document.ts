@@ -12,7 +12,7 @@ export type DocumentString<TData = unknown, TVariables = Record<string, unknown>
 /**
  * Tokens the lexer must keep verbatim (strings) or drop (comments).
  */
-const TOKENS = /"""[\s\S]*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*|[\s,]+|[^"#\s,]+/g;
+const TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*|[\s,]+|[^"#\s,]+/g;
 
 /**
  * Characters that need a separating space when adjacent (names, numbers, variables, negative numbers).
@@ -60,6 +60,7 @@ export function dedupeFragments(document: string): string {
 	const definitions: string[] = [];
 	const seen = new Set<string>();
 	let depth = 0;
+	let parens = 0;
 	let current = "";
 
 	for (const [token] of document.matchAll(TOKENS)) {
@@ -68,7 +69,11 @@ export function dedupeFragments(document: string): string {
 		if (token.startsWith('"') || token.startsWith("#")) continue;
 
 		for (const char of token) {
-			if (char === "{") depth++;
+			if (char === "(") parens++;
+			else if (char === ")") parens--;
+			// Braces inside arguments are object values, not selection sets.
+			else if (parens > 0) continue;
+			else if (char === "{") depth++;
 			else if (char === "}" && --depth === 0) {
 				definitions.push(current.trim());
 				current = "";
@@ -77,7 +82,7 @@ export function dedupeFragments(document: string): string {
 	}
 
 	const unique = definitions.filter(function isFirstDefinition(definition: string): boolean {
-		const name = /^fragment\s+([_A-Za-z]\w*)/.exec(definition)?.[1];
+		const name = /^(?:#[^\n\r]*\s*)*fragment\s+([_A-Za-z]\w*)/.exec(definition)?.[1];
 
 		if (!name) return true;
 		if (seen.has(name)) return false;
@@ -108,7 +113,11 @@ export function minify<T extends string | TypedDocumentString<unknown, unknown>>
 			continue;
 		}
 
-		if (pendingSpace && WORD.test(output.at(-1) ?? "") && WORD.test(token[0]!)) output += " ";
+		const previous = output.at(-1) ?? "";
+		const first = token[0]!;
+
+		// Adjacent names/numbers need a separator, and so do adjacent strings: `""` + `"x"` would read as `"""`.
+		if ((pendingSpace && WORD.test(previous) && WORD.test(first)) || (previous === '"' && first === '"')) output += " ";
 
 		output += token;
 		pendingSpace = false;

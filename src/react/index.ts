@@ -42,15 +42,20 @@ const SKIPPED: QueryState<never> = Object.freeze({ data: undefined, error: undef
  * A suspense request.
  */
 interface SuspenseEntry {
-	/** The in-flight request, thrown to suspend */
-	promise: Promise<unknown>;
-	/** Resolved data */
-	data?: unknown;
-	/** Rejection reason */
+	/** The live query loading while suspended, adopted by the component once it can render */
+	ref: QueryRef<unknown, unknown>;
+	/** Resolves once `ref` has data or failed, thrown to suspend */
+	promise: Promise<void>;
+	/** Failure of the initial load, thrown to the nearest error boundary */
 	error?: unknown;
-	/** Whether the request settled */
-	settled: boolean;
+	/** Whether the initial load failed */
+	failed: boolean;
 }
+
+/**
+ * How long a settled suspense entry waits for its component to mount before being dropped.
+ */
+const SUSPENSE_RETENTION = 10_000;
 
 /**
  * Props of {@link GraphQLProvider}.
@@ -219,26 +224,36 @@ export function useSuspenseQuery<TData = unknown, TVariables extends object = Re
 	const client = useClient();
 	const identity = getIdentity(options);
 	const requests = getSuspenseRequests(client);
-	const entry = requests.get(identity);
-	const ref = useQueryRef<TData, TVariables>(
-		entry?.settled && !entry.error ? { ...options, initialData: entry.data as TData } : options,
+
+	// Suspended renders discard memoized values, so the ref that loaded while suspended is adopted from the entry.
+	// Reusing the same ref (instead of seeding a new one) keeps its freshness tracking, e.g. missed invalidations.
+	const ref = useMemo(
+		function resolveRef(): QueryRef<TData, TVariables> {
+			const entry = requests.get(identity);
+
+			return (entry?.ref as QueryRef<TData, TVariables> | undefined) ?? client.watch<TData, TVariables>(options);
+		},
+		// `identity` captures every option that defines the query.
+		[client, requests, identity],
 	);
 	const state = useSyncExternalStore(ref.subscribe, ref.getState, ref.getState);
 
 	useEffect(
 		function releaseSuspenseEntry(): void {
-			requests.delete(identity);
+			if (requests.get(identity)?.ref === ref) requests.delete(identity);
 		},
-		[requests, identity],
+		[requests, identity, ref],
 	);
 
 	if (state.data === undefined) {
-		if (entry?.settled) {
+		const entry = requests.get(identity);
+
+		if (entry?.failed) {
 			requests.delete(identity);
 			throw entry.error;
 		}
 
-		throw (entry ?? startSuspenseRequest(requests, identity, client.gql<TData, TVariables>(options))).promise;
+		throw (entry ?? startSuspenseRequest(requests, identity, ref as QueryRef<unknown, unknown>)).promise;
 	}
 
 	return { ...state, data: state.data, refetch: ref.refetch, fetchMore: ref.fetchMore };
@@ -355,7 +370,8 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 						latestOptions.current.onData?.(data);
 					}
 
-					setState(close);
+					// An aborted stream ends quietly: its successor already owns the state.
+					if (!controller.signal.aborted) setState(close);
 				} catch (error) {
 					if (!controller.signal.aborted) {
 						setState(function fail(previous: UseSubscriptionResult<TData>): UseSubscriptionResult<TData> {
@@ -455,31 +471,46 @@ function getSuspenseRequests(client: Client): Map<string, SuspenseEntry> {
 }
 
 /**
- * Tracks a suspense request so re-renders throw the same promise and read its outcome.
+ * Loads a live query while its component is suspended, and tracks it so re-renders throw the same promise.
  *
  * @param requests - The client's suspense requests
  * @param identity - The query identity
- * @param request - The request
+ * @param ref - The live query to load
  * @returns The entry
  */
 function startSuspenseRequest(
 	requests: Map<string, SuspenseEntry>,
 	identity: string,
-	request: Promise<unknown>,
+	ref: QueryRef<unknown, unknown>,
 ): SuspenseEntry {
-	const entry: SuspenseEntry = {
-		settled: false,
-		promise: request.then(
-			function resolve(data: unknown): void {
-				entry.data = data;
-				entry.settled = true;
-			},
-			function reject(error: unknown): void {
-				entry.error = error;
-				entry.settled = true;
-			},
-		),
-	};
+	const entry: SuspenseEntry = { ref, failed: false, promise: Promise.resolve() };
+
+	entry.promise = new Promise<void>(function load(resolve): void {
+		let settled = false;
+		let unsubscribe: (() => void) | undefined;
+
+		/**
+		 * Settles once the query has data or failed, then stops observing it.
+		 *
+		 * @param state - The query state
+		 */
+		function observe(state: QueryState<unknown>): void {
+			if (settled || (state.data === undefined && (state.loading || state.error === undefined))) return;
+
+			settled = true;
+			entry.failed = state.data === undefined;
+			entry.error = state.error;
+			unsubscribe?.();
+			resolve();
+			setTimeout(function expire(): void {
+				if (requests.get(identity) === entry) requests.delete(identity);
+			}, SUSPENSE_RETENTION);
+		}
+
+		unsubscribe = ref.subscribe(observe);
+
+		if (settled) unsubscribe();
+	});
 
 	requests.set(identity, entry);
 

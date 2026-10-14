@@ -25,7 +25,7 @@ export interface AbortScope {
 /**
  * Strings and comments are blanked out before scanning so keywords inside them are never matched.
  */
-const IGNORED_TOKENS = /"""[\s\S]*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*/g;
+const IGNORED_TOKENS = /"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\\n\r]|\\.)*"|#[^\n\r]*/g;
 
 /**
  * Matches an operation definition at the start of the document or right after a previous definition.

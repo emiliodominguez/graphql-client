@@ -19,12 +19,13 @@ import type {
 	FetchPolicy,
 	GraphQLFormattedError,
 	GraphQLResponse,
+	MaybePromise,
 	OperationContext,
 	RequestOptions,
 	SubscribeOptions,
 	WatchOptions,
 } from "./types";
-import { createUploadBody } from "./upload";
+import { createUploadBody, extractFiles } from "./upload";
 import {
 	createAbortScope,
 	createCacheKey,
@@ -62,12 +63,23 @@ type TransportOptions = Pick<RequestOptions<unknown, unknown>, "variables" | "op
 interface SharedState {
 	/** Watched queries keyed by their cache key */
 	watchers: Map<string, Set<QueryWatcher<unknown>>>;
+	/** Number of in-flight cache-writing requests per cache key */
+	active: Map<string, number>;
 	/**
-	 * Latest request sequence per cache key: a response superseded by a newer request for the same key
-	 * neither overwrites the cache nor notifies watchers (last request wins).
+	 * Sequence of the newest applied response, write or invalidation per cache key (only tracked while requests
+	 * are in flight). A response older than it neither overwrites the cache nor notifies watchers.
 	 */
-	latest: Map<string, number>;
+	applied: Map<string, number>;
+	/** Recent invalidations, so inactive live queries can tell they missed one */
+	invalidations: Array<{ prefix: CacheKey; epoch: number }>;
+	/** Invalidations older than this epoch were dropped from the log: treat them as matching everything */
+	floor: number;
 }
+
+/**
+ * Maximum number of invalidations remembered per cache.
+ */
+const INVALIDATION_LOG_SIZE = 64;
 
 /**
  * Shared state per cache (or per client when it has no cache).
@@ -75,9 +87,9 @@ interface SharedState {
 const sharedStates = new WeakMap<object, SharedState>();
 
 /**
- * Monotonic request counter feeding {@link SharedState.latest}.
+ * Monotonic counter ordering requests, writes and invalidations across every client.
  */
-let requestSequence = 0;
+let sequence = 0;
 
 /**
  * Returns the shared state of a cache, creating it on first use.
@@ -89,7 +101,7 @@ function getSharedState(owner: object): SharedState {
 	let state = sharedStates.get(owner);
 
 	if (!state) {
-		state = { watchers: new Map(), latest: new Map() };
+		state = { watchers: new Map(), active: new Map(), applied: new Map(), invalidations: [], floor: 0 };
 		sharedStates.set(owner, state);
 	}
 
@@ -151,7 +163,9 @@ export class Client {
 		const operation = parseOperation(query, options.operationName);
 		const isQuery = operation.type === "query";
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
-		const fetchPolicy = options.fetchPolicy ?? (isQuery ? "cache-first" : "no-cache");
+		// Files have no stable identity in a cache key: never cache nor dedupe requests that carry them.
+		const hasFiles = extractFiles(options.variables).files.size > 0;
+		const fetchPolicy = hasFiles ? "no-cache" : (options.fetchPolicy ?? (isQuery ? "cache-first" : "no-cache"));
 		const readsCache = fetchPolicy === "cache-first" || fetchPolicy === "cache-only";
 
 		if (cache && readsCache) {
@@ -172,27 +186,32 @@ export class Client {
 		const canDedupe =
 			dedupe &&
 			isQuery &&
+			!hasFiles &&
 			!options.signal &&
 			!options.headers &&
 			options.timeout === undefined &&
 			options.retry === undefined;
-		const pending = canDedupe ? this.inFlight.get(cacheKey) : undefined;
+		const writesCache = fetchPolicy !== "no-cache";
+		// Requests that write the cache and requests that must not are never merged.
+		const flightKey = writesCache ? cacheKey : `no-cache:${cacheKey}`;
+		const pending = canDedupe ? this.inFlight.get(flightKey) : undefined;
 
 		if (pending) {
 			this.log(operation, "deduplicated");
 			return pending as Promise<TData>;
 		}
 
-		const request = this.execute<TData, TVariables>(query, options, operation, cacheKey, fetchPolicy !== "no-cache");
+		const request = this.execute<TData, TVariables>(query, options, operation, cacheKey, writesCache);
 
 		if (!canDedupe) return request;
 
-		this.inFlight.set(cacheKey, request);
+		this.inFlight.set(flightKey, request);
 
 		try {
 			return await request;
 		} finally {
-			this.inFlight.delete(cacheKey);
+			// An invalidation may already have replaced this entry with a fresh request.
+			if (this.inFlight.get(flightKey) === request) this.inFlight.delete(flightKey);
 		}
 	}
 
@@ -310,6 +329,12 @@ export class Client {
 				hasCache(): boolean {
 					return client.configuration.cache !== undefined;
 				},
+				epoch(): number {
+					return client.epoch();
+				},
+				invalidatedSince(epoch: number): boolean {
+					return client.invalidatedSince(cacheKey, epoch);
+				},
 				register(watcher: QueryWatcher<TData>): () => void {
 					return client.register(cacheKey, watcher as QueryWatcher<unknown>);
 				},
@@ -358,6 +383,8 @@ export class Client {
 	): Promise<void> {
 		const cacheKey = this.getCacheKey(target);
 
+		// In-flight responses for this entry are now older than the written data.
+		this.supersede(cacheKey, ++sequence);
 		await this.configuration.cache?.set(cacheKey, data);
 		this.notify(cacheKey, data);
 	}
@@ -408,13 +435,29 @@ export class Client {
 		const cache = this.configuration.cache;
 		const keys = cache ? [...(await cache.keys())].filter(belongsTo(prefix)) : [];
 
+		const { shared, inFlight } = this;
+		const epoch = ++sequence;
+
+		// In-flight requests started before the invalidation must neither repopulate the cache nor be joined.
+		for (const key of shared.active.keys()) {
+			if (matchesKeyPrefix(key, prefix)) this.supersede(key, epoch);
+		}
+
+		for (const key of [...inFlight.keys()]) {
+			if (matchesKeyPrefix(key.replace(/^no-cache:/, ""), prefix)) inFlight.delete(key);
+		}
+
+		shared.invalidations.push({ prefix, epoch });
+
+		if (shared.invalidations.length > INVALIDATION_LOG_SIZE) shared.floor = shared.invalidations.shift()!.epoch;
+
 		await Promise.all(
 			keys.map(function remove(key: string): unknown {
 				return cache?.delete(key);
 			}),
 		);
 
-		for (const [key, watchers] of this.shared.watchers) {
+		for (const [key, watchers] of shared.watchers) {
 			if (!matchesKeyPrefix(key, prefix)) continue;
 
 			for (const watcher of [...watchers]) watcher.invalidate();
@@ -457,10 +500,7 @@ export class Client {
 		const scope = createAbortScope(options.signal, options.timeout ?? this.configuration.timeout);
 		const policy = resolveRetryPolicy(this.configuration.retry, options.retry);
 		const startedAt = Date.now();
-		const { latest } = this.shared;
-		const sequence = ++requestSequence;
-
-		latest.set(cacheKey, sequence);
+		const order = writesCache ? this.begin(cacheKey) : 0;
 
 		try {
 			for (let attempt = 0; ; attempt++) {
@@ -471,11 +511,8 @@ export class Client {
 
 					this.log(operation, `ok in ${Date.now() - startedAt}ms${attempt ? ` after ${attempt} retries` : ""}`);
 
-					if (latest.get(cacheKey) === sequence) {
-						latest.delete(cacheKey);
-
-						if (writesCache) await this.configuration.cache?.set(cacheKey, data);
-
+					if (writesCache && this.supersede(cacheKey, order)) {
+						await this.configuration.cache?.set(cacheKey, data);
 						this.notify(cacheKey, data);
 					}
 
@@ -499,7 +536,7 @@ export class Client {
 		} finally {
 			scope.dispose();
 
-			if (latest.get(cacheKey) === sequence) latest.delete(cacheKey);
+			if (writesCache) this.end(cacheKey);
 		}
 	}
 
@@ -666,8 +703,18 @@ export class Client {
 			const options = this.configuration.persistedQueries;
 			const custom = typeof options === "object" ? options.hash : undefined;
 
-			hash = Promise.resolve(custom ? custom(query) : sha256(query));
-			this.hashes.set(query, hash);
+			const hashes = this.hashes;
+
+			hash = Promise.resolve()
+				.then(function compute(): MaybePromise<string> {
+					return custom ? custom(query) : sha256(query);
+				})
+				.catch(function forget(error: unknown): never {
+					// Never memoize a failure: the next request retries the hash.
+					hashes.delete(query);
+					throw error;
+				});
+			hashes.set(query, hash);
 		}
 
 		return hash;
@@ -744,6 +791,81 @@ export class Client {
 		}
 
 		return data;
+	}
+
+	/**
+	 * Starts tracking a cache-writing request.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @returns The request's order
+	 */
+	private begin(cacheKey: string): number {
+		const { active } = this.shared;
+
+		active.set(cacheKey, (active.get(cacheKey) ?? 0) + 1);
+
+		return ++sequence;
+	}
+
+	/**
+	 * Marks `order` as the newest state of a cache key, unless something newer was already applied.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param order - The order of the response, write or invalidation
+	 * @returns Whether `order` is the newest (the caller may apply its data)
+	 */
+	private supersede(cacheKey: string, order: number): boolean {
+		const { active, applied } = this.shared;
+
+		if (order <= (applied.get(cacheKey) ?? 0)) return false;
+
+		// Ordering only matters while requests are in flight.
+		if (active.has(cacheKey)) applied.set(cacheKey, order);
+
+		return true;
+	}
+
+	/**
+	 * Stops tracking a cache-writing request.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 */
+	private end(cacheKey: string): void {
+		const { active, applied } = this.shared;
+		const remaining = (active.get(cacheKey) ?? 1) - 1;
+
+		if (remaining > 0) {
+			active.set(cacheKey, remaining);
+		} else {
+			active.delete(cacheKey);
+			applied.delete(cacheKey);
+		}
+	}
+
+	/**
+	 * Returns the current invalidation epoch.
+	 *
+	 * @returns The epoch
+	 */
+	private epoch(): number {
+		return sequence;
+	}
+
+	/**
+	 * Checks whether a cache key was invalidated after an epoch.
+	 *
+	 * @param cacheKey - The serialized cache key
+	 * @param since - The epoch to compare with
+	 * @returns `true` when an invalidation matching the key happened after `since`
+	 */
+	private invalidatedSince(cacheKey: string, since: number): boolean {
+		const { invalidations, floor } = this.shared;
+
+		if (since < floor) return true;
+
+		return invalidations.some(function matches(entry: { prefix: CacheKey; epoch: number }): boolean {
+			return entry.epoch > since && matchesKeyPrefix(cacheKey, entry.prefix);
+		});
 	}
 
 	/**

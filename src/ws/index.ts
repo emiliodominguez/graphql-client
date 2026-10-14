@@ -160,7 +160,8 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	 * Opens the socket if needed. Subscriptions are (re)sent once the server acknowledges the connection.
 	 */
 	function connect(): void {
-		if (socket || disposed) return;
+		// A reconnect timer may fire after every subscription ended: nothing left to connect for.
+		if (socket || disposed || sinks.size === 0) return;
 
 		const Implementation = options.WebSocket ?? globalThis.WebSocket;
 		const current = new Implementation(url, PROTOCOL);
@@ -218,6 +219,8 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 				for (const [id, active] of sinks) send(target, { id, type: "subscribe", payload: active.request });
 
 				if (keepAlive > 0) ping(target, false);
+
+				scheduleLazyClose();
 				break;
 			case "ping":
 				send(target, { type: "pong" });
@@ -293,6 +296,8 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	function failAll(error: unknown): void {
 		const active = [...sinks.values()];
 
+		// Give the next subscription a full retry budget.
+		attempt = 0;
 		sinks.clear();
 
 		for (const sink of active) sink.error(error);
@@ -319,6 +324,7 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
 	return {
 		async *subscribe(request: SubscriptionRequest, signal: AbortSignal): AsyncGenerator<GraphQLResponse<unknown>> {
 			if (disposed) throw new Error("WebSocket transport has been disposed.");
+			if (signal.aborted) return;
 
 			const id = String(++nextId);
 			const queue = new AsyncQueue<GraphQLResponse<unknown>>();
