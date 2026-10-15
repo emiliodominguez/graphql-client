@@ -1,6 +1,6 @@
 {
 	"name": "lumenql",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"description": "Zero-dependency, typed GraphQL client with caching, request deduplication, retries, subscriptions, streaming and React hooks. Works with the Fetch API across runtimes.",
 	"keywords": [
 		"graphql",
